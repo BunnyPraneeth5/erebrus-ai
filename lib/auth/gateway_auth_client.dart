@@ -124,7 +124,7 @@ class GatewayAuthClient {
     );
   }
 
-  /// `POST /api/v2/organizations`.
+  /// `POST /api/v2/orgs`.
   Future<Map<String, dynamic>> createOrg({
     required String name,
     required String slug,
@@ -134,6 +134,42 @@ class GatewayAuthClient {
       'name': name,
       'slug': slug,
     }, bearerToken: bearerToken);
+  }
+
+  /// `POST /api/v2/referrals/redeem` — apply a referral / invite code after
+  /// signup. Binds the caller's referrer (one per account, ever); once the
+  /// caller has an active org membership, XP is awarded to both parties on the
+  /// gateway. Returns the updated referral summary. Requires a bearer token.
+  Future<ReferralSummary> redeemReferralCode({
+    required String code,
+    required String bearerToken,
+  }) async {
+    final map = await _postJson(
+      Uri.parse('$_base/api/v2/referrals/redeem'),
+      {'code': code.trim().toUpperCase()},
+      bearerToken: bearerToken,
+    );
+    return ReferralSummary.fromJson(map);
+  }
+
+  /// `GET /api/v2/referrals/me` — the caller's referral code, referrer, and
+  /// recent referees.
+  Future<ReferralSummary> fetchReferralSummary(String bearerToken) async {
+    final map = await _getJson(
+      Uri.parse('$_base/api/v2/referrals/me'),
+      bearerToken: bearerToken,
+    );
+    return ReferralSummary.fromJson(Map<String, dynamic>.from(map as Map));
+  }
+
+  /// `GET /api/v2/rank/me` — the caller's XP standing. Lifetime XP is
+  /// `xp_earned`; the account profile does not carry XP.
+  Future<RankStanding> fetchRank(String bearerToken) async {
+    final map = await _getJson(
+      Uri.parse('$_base/api/v2/rank/me'),
+      bearerToken: bearerToken,
+    );
+    return RankStanding.fromJson(Map<String, dynamic>.from(map as Map));
   }
 
   Future<void> emailLoginStart(String email) async {
@@ -321,6 +357,104 @@ class AuthSession {
   final String userId;
   final String role;
   final String walletAddress;
+}
+
+/// The caller's referral standing (`GET /api/v2/referrals/me` and the response
+/// of `POST /api/v2/referrals/redeem`). XP is not part of this payload — read
+/// lifetime XP from [RankStanding.xpEarned] instead.
+class ReferralSummary {
+  const ReferralSummary({
+    this.code = '',
+    this.referredCount = 0,
+    this.referralBound = false,
+    this.referredBy,
+    this.recent = const [],
+  });
+
+  /// The caller's own shareable referral code.
+  final String code;
+
+  /// How many users this caller has referred.
+  final int referredCount;
+
+  /// True once a referrer has been bound to this account (one-shot, immutable).
+  final bool referralBound;
+
+  /// Truncated wallet of whoever referred the caller, when bound.
+  final String? referredBy;
+
+  /// Most recent referees (wallets truncated by the gateway).
+  final List<ReferralReferee> recent;
+
+  factory ReferralSummary.fromJson(Map<String, dynamic> j) {
+    final recentRaw = j['recent'];
+    return ReferralSummary(
+      code: (j['code'] ?? '').toString(),
+      referredCount: j['referred_count'] is int ? j['referred_count'] as int : 0,
+      referralBound: j['referral_bound'] == true,
+      referredBy: (j['referred_by'] as String?)?.trim().isNotEmpty == true
+          ? j['referred_by'] as String
+          : null,
+      recent: recentRaw is List
+          ? recentRaw
+                .whereType<Map>()
+                .map((e) => ReferralReferee.fromJson(Map<String, dynamic>.from(e)))
+                .toList()
+          : const [],
+    );
+  }
+}
+
+/// One recent referee inside a [ReferralSummary].
+class ReferralReferee {
+  const ReferralReferee({
+    this.wallet = '',
+    this.qualified = false,
+    this.joinedAt,
+  });
+
+  final String wallet;
+  final bool qualified;
+  final DateTime? joinedAt;
+
+  factory ReferralReferee.fromJson(Map<String, dynamic> j) => ReferralReferee(
+    wallet: (j['wallet'] ?? '').toString(),
+    qualified: j['qualified'] == true,
+    joinedAt: DateTime.tryParse((j['joined_at'] ?? '').toString())?.toUtc(),
+  );
+}
+
+/// The caller's XP standing (`GET /api/v2/rank/me`). Lifetime XP is [xpEarned].
+class RankStanding {
+  const RankStanding({
+    this.xpEarned = 0,
+    this.xpClaimed = 0,
+    this.xpClaimable = 0,
+    this.tier = 0,
+    this.tierName,
+    this.nextTierAt,
+  });
+
+  final int xpEarned;
+  final int xpClaimed;
+  final int xpClaimable;
+  final int tier;
+  final String? tierName;
+  final int? nextTierAt;
+
+  static const zero = RankStanding();
+
+  factory RankStanding.fromJson(Map<String, dynamic> j) => RankStanding(
+    xpEarned: _asInt(j['xp_earned']),
+    xpClaimed: _asInt(j['xp_claimed']),
+    xpClaimable: _asInt(j['xp_claimable']),
+    tier: _asInt(j['tier']),
+    tierName: j['tier_name']?.toString(),
+    nextTierAt: j['next_tier_at'] == null ? null : _asInt(j['next_tier_at']),
+  );
+
+  static int _asInt(dynamic v) =>
+      v is int ? v : (v is num ? v.toInt() : int.tryParse('${v ?? ''}') ?? 0);
 }
 
 class AuthException implements Exception {

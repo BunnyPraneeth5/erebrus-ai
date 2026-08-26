@@ -12,6 +12,7 @@ import '../services/storage_service.dart';
 import '../navigation/shell_tab.dart';
 import '../auth/user_org_invite.dart';
 import '../auth/user_profile.dart';
+import '../auth/gateway_auth_client.dart';
 import '../auth/wallet_auth_controller.dart';
 import '../org/ai_org.dart';
 import '../org/org_state.dart';
@@ -98,6 +99,34 @@ class AppState extends ChangeNotifier {
   UserProfile? get userProfile => auth.userProfile;
   List<UserOrgInvite> get pendingInvites => auth.accountOrgInvites;
   EntitlementState get entitlement => auth.entitlement;
+
+  /// A referral / invite code captured before the user redeems it (e.g. from a
+  /// share link). The referral card pre-fills its field with this value. Deep
+  /// linking is not wired yet, so today it is only ever set explicitly.
+  String? capturedReferralCode;
+
+  bool get isRedeemingReferral => auth.isRedeemingReferral;
+  String? get referralError => auth.referralError;
+  String? get referralMessage => auth.referralMessage;
+  ReferralSummary? get referralSummary => auth.referralSummary;
+
+  /// Lifetime XP from `GET /api/v2/rank/me` (`xp_earned`). The account profile
+  /// does not carry XP, so this is the source for the XP shown in Settings.
+  RankStanding? get rank => auth.rank;
+  int? get xpEarned => auth.rank?.xpEarned;
+
+  void setCapturedReferralCode(String? code) {
+    final next = code?.trim();
+    capturedReferralCode = (next != null && next.isNotEmpty) ? next : null;
+    notifyListeners();
+  }
+
+  /// Redeems a referral code and clears any captured value on success.
+  Future<bool> redeemReferralCode(String code) async {
+    final ok = await auth.redeemReferralCode(code);
+    if (ok) capturedReferralCode = null;
+    return ok;
+  }
 
   List<AiOrg> get orgs => orgState.orgs;
   AiOrg? get selectedOrg => orgState.selectedOrg;

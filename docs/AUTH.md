@@ -89,9 +89,9 @@ The token is read at startup in `WalletAuthController.initialize()`.
 selected organization, lists shared models.
 
 - `OrgClient.fetchOrganizations(token)` — list orgs the user belongs to.
-- `OrgClient.fetchOrgModels(token, orgId)` — list models shared in the org.
+- `OrgClient.fetchOrgModels(orgId, token)` — list models shared in the org.
 - `OrgClient.inviteMember(...)` — invite a wallet/email to an org.
-- `OrgClient.sharePersona(token, orgId, personaId)` — share a persona.
+- `OrgClient.sharePersona(orgId: …, personaId: …, bearerToken: …)` — share a persona.
 
 The UI surfaces org data in:
 
@@ -110,9 +110,59 @@ The UI surfaces org data in:
 - `fetchSubscription(token)` — entitlement status.
 - `fetchProfile(token)` — user profile.
 - `fetchAccountOrgInvites(token)` — pending org invites.
-- `createOrganization(...)` — create a new org.
+- `createOrg(name, slug, token)` — create a new org (`POST /api/v2/orgs`).
+- `redeemReferralCode(code, token)` — redeem a referral / invite code
+  (`POST /api/v2/referrals/redeem`).
+- `fetchReferralSummary(token)` — the caller's code, referrer, and referees
+  (`GET /api/v2/referrals/me`).
+- `fetchRank(token)` — the caller's XP standing (`GET /api/v2/rank/me`).
 
 Base URL is configured by `GATEWAY_URL` (default `https://gateway.erebrus.io`).
+
+> **Note on org paths.** The gateway exposes org collection/creation at
+> `/api/v2/orgs` while per-org sub-resources (`/models`, `/personas`,
+> `/invites`) live under `/api/v2/organizations/{id}`. Keep this split in mind
+> when adding endpoints — confirm the correct prefix with the gateway team
+> rather than assuming one form.
+
+---
+
+## Referrals & XP
+
+A user redeems a referral / invite code from **Settings → Referrals** (the
+`_ReferralCard`). The APPLY button calls `AppState.redeemReferralCode(code)`,
+which delegates to `WalletAuthController.redeemReferralCode` →
+`GatewayAuthClient.redeemReferralCode` (`POST /api/v2/referrals/redeem`).
+
+Redeeming binds the caller's *referrer* — one per account, ever. XP is awarded
+to **both** the referee and the referrer, but only once the referee **qualifies**
+(has an active organization membership); binding before then simply records the
+relationship and the award reconciles later. The redeem response is the caller's
+referral summary, not an XP payload:
+
+```json
+{ "code": "ABC12345", "referred_count": 0, "referral_bound": true,
+  "referred_by": "wallet…addr", "recent": [] }
+```
+
+Gateway errors are a **flat** envelope — `{"error": "invite code not found"}`
+(404), `{"error": "you can't redeem your own invite code"}` (400),
+`{"error": "an invite code is already applied to this account"}` (409).
+
+### XP display
+
+Lifetime XP is **not** on the account profile (`GET /api/v2/account/profile`).
+It comes from `GET /api/v2/rank/me` as `xp_earned` (`RankStanding.xpEarned`,
+exposed as `AppState.xpEarned`). The controller refreshes rank after sign-in,
+session restore, and a successful redeem, so the account card's `XP` badge stays
+current.
+
+### Captured codes
+
+`AppState.capturedReferralCode` lets a code be pre-filled into the field before
+the user redeems it (e.g. from a future share/deep link). Deep-link capture is
+**not wired yet** — the field is filled manually today, and
+`setCapturedReferralCode` is the seam a deep-link handler would call.
 
 ---
 

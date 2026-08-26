@@ -45,6 +45,10 @@ class SettingsScreen extends StatelessWidget {
         const SizedBox(height: 9),
         const _OrganizationsCard(),
         const SizedBox(height: 14),
+        _SectionLabel('REFERRALS', wide: wide),
+        const SizedBox(height: 9),
+        const _ReferralCard(),
+        const SizedBox(height: 14),
         SettingsCard(
           children: [
             SettingsRow(
@@ -974,6 +978,17 @@ class _AccountCard extends StatelessWidget {
                   wallet == null ? 'Signed in' : 'Solana · $wallet',
                   style: AppText.mono(12, color: AppColors.textTertiary),
                 ),
+                if (app.xpEarned case final xp?) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    '$xp XP',
+                    style: AppText.mono(
+                      12,
+                      weight: FontWeight.w600,
+                      color: AppColors.accent,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -992,6 +1007,136 @@ class _AccountCard extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Redeem a referral / invite code. Redeeming credits the referrer with XP on
+/// the gateway. The field pre-fills from any captured code (deep links are not
+/// wired yet); the APPLY button calls [AppState.redeemReferralCode].
+class _ReferralCard extends StatefulWidget {
+  const _ReferralCard();
+
+  @override
+  State<_ReferralCard> createState() => _ReferralCardState();
+}
+
+class _ReferralCardState extends State<_ReferralCard> {
+  final _code = TextEditingController();
+  String? _syncedCapture;
+
+  @override
+  void dispose() {
+    _code.dispose();
+    super.dispose();
+  }
+
+  Future<void> _apply(AppState app) async {
+    final code = _code.text.trim();
+    if (code.isEmpty || app.isRedeemingReferral) return;
+    FocusScope.of(context).unfocus();
+    final ok = await app.redeemReferralCode(code);
+    if (ok && mounted) _code.clear();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+    return AnimatedBuilder(
+      animation: app.auth,
+      builder: (context, _) {
+        // Pre-fill from a newly captured code without clobbering user edits.
+        final captured = app.capturedReferralCode;
+        if (captured != null && captured != _syncedCapture) {
+          _syncedCapture = captured;
+          _code.text = captured;
+        }
+        final busy = app.isRedeemingReferral;
+        final message = app.referralMessage;
+        final error = app.referralError;
+        return SettingsCard(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 13, 14, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(
+                        Symbols.redeem,
+                        color: AppColors.accent,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Have an invite code?',
+                              style: AppText.grotesk(
+                                14.5,
+                                weight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'Redeem it to reward whoever invited you.',
+                              style: AppText.grotesk(
+                                12,
+                                color: AppColors.textTertiary,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _code,
+                          enabled: !busy,
+                          textInputAction: TextInputAction.done,
+                          textCapitalization: TextCapitalization.characters,
+                          onSubmitted: (_) => _apply(app),
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            labelText: 'Referral code',
+                            hintText: 'EREBRUS-XXXX',
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      FilledButton(
+                        onPressed: busy ? null : () => _apply(app),
+                        child: Text(busy ? '…' : 'APPLY'),
+                      ),
+                    ],
+                  ),
+                  if (error != null && error.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      error,
+                      style: AppText.grotesk(12, color: AppColors.danger),
+                    ),
+                  ] else if (message != null && message.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      message,
+                      style: AppText.grotesk(12, color: AppColors.accent),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }

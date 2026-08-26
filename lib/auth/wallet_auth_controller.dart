@@ -56,6 +56,15 @@ class WalletAuthController extends ChangeNotifier {
   bool isLoadingAccountOrgInvites = false;
   String? accountOrgInvitesError;
 
+  bool isRedeemingReferral = false;
+  String? referralError;
+  String? referralMessage;
+  ReferralSummary? referralSummary;
+
+  RankStanding? rank;
+  bool isLoadingRank = false;
+  String? rankError;
+
   AuthMethods authMethods = AuthMethods.unknown;
   bool appleDeviceReady = false;
 
@@ -108,6 +117,7 @@ class WalletAuthController extends ChangeNotifier {
         await revalidateSession();
         await refreshProfile();
         await refreshAccountOrgInvites();
+        await refreshRank();
         if (isAuthenticated) {
           debugPrint('[Auth] restored session for ${stored.walletAddress}');
         }
@@ -323,6 +333,7 @@ class WalletAuthController extends ChangeNotifier {
       await refreshEntitlement();
       await refreshProfile();
       await refreshAccountOrgInvites();
+      await refreshRank();
       debugPrint('[Auth] manual paste login OK');
     } on AuthException catch (e) {
       authError = e.message;
@@ -375,6 +386,7 @@ class WalletAuthController extends ChangeNotifier {
       await refreshEntitlement();
       await refreshProfile();
       await refreshAccountOrgInvites();
+      await refreshRank();
       debugPrint('[Auth] web login OK for ${callback.walletAddress}');
     } on DesktopWebAuthException catch (e) {
       authError = e.message;
@@ -514,6 +526,7 @@ class WalletAuthController extends ChangeNotifier {
     await refreshEntitlement();
     await refreshProfile();
     await refreshAccountOrgInvites();
+    await refreshRank();
   }
 
   /// Mobile Wallet Adapter path — opens the native wallet selector on Seeker/Saga.
@@ -555,6 +568,7 @@ class WalletAuthController extends ChangeNotifier {
       await refreshEntitlement();
       await refreshProfile();
       await refreshAccountOrgInvites();
+      await refreshRank();
       debugPrint('[MWA] gateway auth OK for ${result.address}');
     } on MwaException catch (e) {
       authError = e.message;
@@ -581,6 +595,12 @@ class WalletAuthController extends ChangeNotifier {
     authMethod = '';
     userProfile = null;
     accountOrgInvites = [];
+    isRedeemingReferral = false;
+    referralError = null;
+    referralMessage = null;
+    referralSummary = null;
+    rank = null;
+    rankError = null;
     await _store.clear();
     if (appKitModal?.isConnected == true) {
       await appKitModal?.disconnect();
@@ -648,6 +668,12 @@ class WalletAuthController extends ChangeNotifier {
     profileError = null;
     accountOrgInvites = [];
     accountOrgInvitesError = null;
+    isRedeemingReferral = false;
+    referralError = null;
+    referralMessage = null;
+    referralSummary = null;
+    rank = null;
+    rankError = null;
     awaitingWebCallback = false;
     authError = kSessionExpiredMessage;
     sessionExpiredRevision++;
@@ -733,13 +759,14 @@ class WalletAuthController extends ChangeNotifier {
     }
   }
 
-  Future<void> acceptAccountOrgInvite(String orgId) async {
+  /// Accepts a pending org invite by its invite id. Callers are responsible for
+  /// refreshing [OrgState] so the newly joined org appears in the list.
+  Future<void> acceptAccountOrgInvite(String inviteId) async {
     final token = _token;
     if (token == null || token.isEmpty) return;
     try {
-      await _authClient.acceptAccountOrgInvite(orgId, token);
+      await _authClient.acceptAccountOrgInvite(inviteId, token);
       await refreshAccountOrgInvites();
-      // The gateway controller / org state should refresh orgs after an accept.
     } on AuthException catch (e) {
       authError = e.message;
       notifyListeners();
@@ -747,16 +774,82 @@ class WalletAuthController extends ChangeNotifier {
     }
   }
 
-  Future<void> declineAccountOrgInvite(String orgId) async {
+  Future<void> declineAccountOrgInvite(String inviteId) async {
     final token = _token;
     if (token == null || token.isEmpty) return;
     try {
-      await _authClient.declineAccountOrgInvite(orgId, token);
+      await _authClient.declineAccountOrgInvite(inviteId, token);
       await refreshAccountOrgInvites();
     } on AuthException catch (e) {
       authError = e.message;
       notifyListeners();
       rethrow;
+    }
+  }
+
+  /// Redeems a referral / invite code for the signed-in user. Binding a
+  /// referrer is one-shot per account; XP is awarded to both parties on the
+  /// gateway once the caller has an active org membership. Returns true on
+  /// success; on failure [referralError] holds the reason.
+  Future<bool> redeemReferralCode(String code) async {
+    final trimmed = code.trim();
+    if (trimmed.isEmpty) {
+      referralError = 'Enter a referral code';
+      notifyListeners();
+      return false;
+    }
+    final token = _token;
+    if (token == null || token.isEmpty) {
+      referralError = 'Sign in to redeem a referral code';
+      notifyListeners();
+      return false;
+    }
+    isRedeemingReferral = true;
+    referralError = null;
+    referralMessage = null;
+    notifyListeners();
+    try {
+      referralSummary = await _authClient.redeemReferralCode(
+        code: trimmed,
+        bearerToken: token,
+      );
+      // XP unlocks only once the referee qualifies (active org membership), so
+      // the message stays outcome-neutral. Lifetime XP lives on the rank
+      // endpoint, not the profile — refresh it so any award shows.
+      referralMessage = 'Invite code applied';
+      await refreshRank();
+      return true;
+    } on AuthException catch (e) {
+      referralError = e.message;
+      return false;
+    } catch (e) {
+      referralError = e.toString();
+      return false;
+    } finally {
+      isRedeemingReferral = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> refreshRank() async {
+    final token = _token;
+    if (token == null || token.isEmpty) {
+      rank = RankStanding.zero;
+      notifyListeners();
+      return;
+    }
+    isLoadingRank = true;
+    rankError = null;
+    notifyListeners();
+    try {
+      rank = await _authClient.fetchRank(token);
+    } on AuthException catch (e) {
+      if (e.statusCode != 401) rankError = e.message;
+    } catch (e) {
+      rankError = e.toString();
+    } finally {
+      isLoadingRank = false;
+      notifyListeners();
     }
   }
 
@@ -839,6 +932,7 @@ class WalletAuthController extends ChangeNotifier {
       await refreshEntitlement();
       await refreshProfile();
       await refreshAccountOrgInvites();
+      await refreshRank();
       if (modal.isOpen) modal.closeModal();
       debugPrint('[Reown] gateway auth OK for $address');
     } on AuthException catch (e) {
