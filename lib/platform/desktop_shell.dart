@@ -49,12 +49,20 @@ class _DesktopShellState extends State<DesktopShell>
   Future<void> _initialize() async {
     try {
       await windowManager.ensureInitialized();
-      await windowManager.setPreventClose(true);
       // A tray-owned app should never have a second launcher in the Dock or
       // taskbar. On macOS this switches the process to accessory mode; the
       // native LSUIElement setting also prevents a Dock icon from flashing
       // briefly before Flutter has initialized.
-      await windowManager.setSkipTaskbar(true);
+      //
+      // skipTaskbar has to be applied through waitUntilReadyToShow: on Windows
+      // that is the only call which constructs the ITaskbarList3 COM instance
+      // the native SetSkipTaskbar dereferences, so invoking it directly aborts
+      // the process with an access violation. The call is a no-op on macOS and
+      // Linux.
+      await windowManager.waitUntilReadyToShow(
+        const WindowOptions(skipTaskbar: true),
+      );
+      await windowManager.setPreventClose(true);
       _initialized = true;
       await _syncInferenceState(force: true);
       debugPrint('[Desktop] Erebrus AI tray ready');
