@@ -6,6 +6,23 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+}
+
+fun hasSigningBlock(prefix: String): Boolean {
+    val storeFilePath = keystoreProperties.getProperty("$prefix.storeFile")
+    return listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+        .all { !keystoreProperties.getProperty("$prefix.$it").isNullOrBlank() } &&
+        !storeFilePath.isNullOrBlank() &&
+        file(storeFilePath).exists()
+}
+
+val hasPlaystoreSigning = hasSigningBlock("playstore")
+val hasDappstoreSigning = hasSigningBlock("dappstore")
+
 android {
     namespace = "com.erebrus.ai"
     compileSdk = 36
@@ -18,10 +35,7 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.erebrus.ai"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         // Native llama.cpp uses APIs introduced in Android 9.
         minSdk = 28
         targetSdk = flutter.targetSdkVersion
@@ -29,44 +43,88 @@ android {
         versionName = flutter.versionName
     }
 
+    flavorDimensions += "store"
+    productFlavors {
+        create("playstore") {
+            dimension = "store"
+        }
+        create("dappstore") {
+            dimension = "store"
+        }
+    }
+
     signingConfigs {
-        create("release") {
-            val keyPropsFile = rootProject.file("key.properties")
-            if (keyPropsFile.exists()) {
-                val keyProps = Properties().apply {
-                    keyPropsFile.inputStream().use { load(it) }
-                }
-                val storeFilePath = keyProps.getProperty("storeFile")
-                if (!storeFilePath.isNullOrEmpty()) {
-                    storeFile = file(storeFilePath)
-                }
-                storePassword = keyProps.getProperty("storePassword")
-                keyAlias = keyProps.getProperty("keyAlias")
-                keyPassword = keyProps.getProperty("keyPassword")
-            } else {
-                val keystorePath = project.findProperty("ANDROID_KEYSTORE_PATH") as String?
-                    ?: System.getenv("ANDROID_KEYSTORE_PATH")
-                if (keystorePath != null && file(keystorePath).exists()) {
-                    storeFile = file(keystorePath)
-                    storePassword = project.findProperty("ANDROID_KEYSTORE_PASSWORD") as String?
-                        ?: System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                    keyAlias = project.findProperty("ANDROID_KEY_ALIAS") as String?
-                        ?: System.getenv("ANDROID_KEY_ALIAS")
-                    keyPassword = project.findProperty("ANDROID_KEY_PASSWORD") as String?
-                        ?: System.getenv("ANDROID_KEY_PASSWORD")
-                }
+        create("playstoreRelease") {
+            enableV2Signing = true
+            enableV3Signing = true
+            if (hasPlaystoreSigning) {
+                storeFile = file(keystoreProperties.getProperty("playstore.storeFile"))
+                storePassword = keystoreProperties.getProperty("playstore.storePassword")
+                keyAlias = keystoreProperties.getProperty("playstore.keyAlias")
+                keyPassword = keystoreProperties.getProperty("playstore.keyPassword")
+            }
+        }
+        create("dappstoreRelease") {
+            enableV2Signing = true
+            enableV3Signing = true
+            if (hasDappstoreSigning) {
+                storeFile = file(keystoreProperties.getProperty("dappstore.storeFile"))
+                storePassword = keystoreProperties.getProperty("dappstore.storePassword")
+                keyAlias = keystoreProperties.getProperty("dappstore.keyAlias")
+                keyPassword = keystoreProperties.getProperty("dappstore.keyPassword")
             }
         }
     }
 
     buildTypes {
         release {
-            val releaseSigning = signingConfigs.getByName("release")
-            signingConfig = if (releaseSigning.storeFile != null && releaseSigning.storeFile!!.exists()) {
-                releaseSigning
-            } else {
-                signingConfigs.getByName("debug")
+            isMinifyEnabled = false
+            isShrinkResources = false
+        }
+    }
+
+    androidComponents {
+        onVariants { variant ->
+            val flavorName = variant.productFlavors
+                .firstOrNull { it.first == "store" }
+                ?.second
+
+            if (variant.buildType == "release") {
+                when (flavorName) {
+                    "playstore" -> {
+                        val config = signingConfigs.getByName("playstoreRelease")
+                        variant.signingConfig.setConfig(
+                            if (config.storeFile != null && config.storeFile!!.exists()) {
+                                config
+                            } else {
+                                signingConfigs.getByName("debug")
+                            }
+                        )
+                    }
+                    "dappstore" -> {
+                        val config = signingConfigs.getByName("dappstoreRelease")
+                        variant.signingConfig.setConfig(
+                            if (config.storeFile != null && config.storeFile!!.exists()) {
+                                config
+                            } else {
+                                signingConfigs.getByName("debug")
+                            }
+                        )
+                    }
+                }
             }
+        }
+    }
+}
+
+// Default debug builds to playstore so `flutter run` works without --flavor.
+androidComponents {
+    beforeVariants { variantBuilder ->
+        val flavorName = variantBuilder.productFlavors
+            .firstOrNull { it.first == "store" }
+            ?.second
+        if (variantBuilder.buildType == "debug" && flavorName == "dappstore") {
+            variantBuilder.enable = false
         }
     }
 }

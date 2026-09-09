@@ -12,18 +12,22 @@
 #   ErebrusAI-macos-v1.0.0.zip
 #   ErebrusAI-windows-v1.0.0.zip
 #   ErebrusAI-ubuntu-v1.0.0.tar.gz
-#   ErebrusAI-android-v1.0.0.SKIPPED.txt   (mock — no release keystore yet)
+#   ErebrusAI-android-playstore-v1.0.2.aab
+#   ErebrusAI-android-dappstore-v1.0.2.apk
 #
 # Usage:
 #   ./scripts/build-all-release.sh              # all platforms supported here
 #   ./scripts/build-all-release.sh ios macos
+#   ./scripts/build-all-release.sh android
+#   ./scripts/build-all-release.sh android-playstore
+#   ./scripts/build-all-release.sh android-dappstore
 #   ./scripts/build-all-release.sh --skip-verify
 #   ./scripts/build-all-release.sh --skip-tests
 #   ./scripts/build-all-release.sh --list
 #
 # On macOS: iOS, macOS (native). Ubuntu via Docker when available.
 # Windows requires a Windows host (or CI).
-# Android is intentionally skipped until release signing keys exist.
+# Android: Google Play AAB + Solana dApp Store APK (signed flavors).
 #
 set -euo pipefail
 
@@ -171,41 +175,114 @@ preflight() {
 }
 
 # ---------------------------------------------------------------------------
-# Android — intentionally not released yet (no release keystore)
+# Android — Google Play AAB + Solana dApp Store APK
 # ---------------------------------------------------------------------------
 
-build_android() {
-  info "Android release — SKIPPED (no release signing keys yet)"
-  warn "android/app/build.gradle.kts still signs release with the debug keystore."
-  warn "Play Store / sideload APK builds are deferred until key.properties exists."
+ensure_android_signing() {
+  [[ -f android/key.properties ]] || die \
+    "Missing android/key.properties. Copy android/key.properties.example and fill passwords."
 
+  local missing=0
+  for prefix in playstore dappstore; do
+    for key in storeFile storePassword keyAlias keyPassword; do
+      if ! grep -qE "^${prefix}\\.${key}=.+" android/key.properties; then
+        warn "android/key.properties missing ${prefix}.${key}"
+        missing=1
+      fi
+    done
+  done
+  [[ "${missing}" -eq 0 ]] || die "Fix android/key.properties before Android release builds."
+
+  resolve_keystore() {
+    local raw="$1"
+    if [[ "${raw}" = /* ]]; then
+      [[ -f "${raw}" ]] && { echo "${raw}"; return; }
+      return 1
+    fi
+    local c
+    for c in "android/app/${raw}" "android/${raw}" "${raw}"; do
+      if [[ -f "${c}" ]]; then
+        echo "${c}"
+        return 0
+      fi
+    done
+    return 1
+  }
+
+  local play_ks dapp_ks play_path dapp_path
+  play_ks="$(grep '^playstore.storeFile=' android/key.properties | cut -d= -f2-)"
+  dapp_ks="$(grep '^dappstore.storeFile=' android/key.properties | cut -d= -f2-)"
+  play_path="$(resolve_keystore "${play_ks}")" \
+    || die "Play Store keystore not found (playstore.storeFile=${play_ks})"
+  dapp_path="$(resolve_keystore "${dapp_ks}")" \
+    || die "dApp Store keystore not found (dappstore.storeFile=${dapp_ks})"
+  ok "playstore keystore: ${play_path}"
+  ok "dappstore keystore: ${dapp_path}"
+}
+
+verify_android_apk() {
+  local apk="$1"
+  [[ "${SKIP_VERIFY}" -eq 0 ]] || return 0
+  info "Verifying Android APK version + signature…"
+  local aapt=""
+  if [[ -n "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}" ]]; then
+    aapt="$(ls -d "${ANDROID_HOME:-$ANDROID_SDK_ROOT}"/build-tools/*/aapt 2>/dev/null | tail -1 || true)"
+  fi
+  if [[ -n "${aapt}" ]]; then
+    local short build
+    short="$("${aapt}" dump badging "${apk}" 2>/dev/null | sed -n "s/.*versionName='\\([^']*\\)'.*/\\1/p" | head -1)"
+    build="$("${aapt}" dump badging "${apk}" 2>/dev/null | sed -n "s/.*versionCode='\\([^']*\\)'.*/\\1/p" | head -1)"
+    echo "    versionName=${short} versionCode=${build}"
+    [[ "${short}" == "${VERSION_NAME}" ]] && ok "APK versionName matches pubspec (${VERSION_NAME})" \
+      || warn "APK versionName '${short}' != pubspec ${VERSION_NAME}"
+    [[ "${build}" == "${VERSION_CODE}" ]] && ok "APK versionCode matches pubspec (${VERSION_CODE})" \
+      || warn "APK versionCode '${build}' != pubspec ${VERSION_CODE}"
+  else
+    warn "aapt not found — skip versionName/versionCode check"
+  fi
+  if command -v apksigner >/dev/null 2>&1; then
+    apksigner verify --verbose "${apk}" >/dev/null && ok "apksigner verify passed"
+  fi
+}
+
+build_android_playstore() {
+  info "Google Play App Bundle (playstore, ${VERSION_NAME}+${VERSION_CODE})"
+  ensure_android_signing
+  local define_args
+  define_args="$(dart_define_args)"
+  # shellcheck disable=SC2086
+  flutter build appbundle --flavor playstore --release \
+    --target-platform android-arm64 ${define_args}
+
+  local src="build/app/outputs/bundle/playstoreRelease/app-playstore-release.aab"
+  [[ -f "${src}" ]] || die "Play Store AAB not found: ${src}"
   local dest
-  dest="$(artifact_path android SKIPPED.txt)"
-  cat > "${dest}" <<EOF
-Erebrus AI — Android release placeholder
-========================================
+  dest="$(artifact_path android-playstore aab)"
+  copy_artifact "${src}" "${dest}"
+}
 
-Version: ${VERSION_NAME}+${VERSION_CODE}  (from pubspec.yaml)
-Status:  SKIPPED / not released
+build_android_dappstore() {
+  info "Solana dApp Store APK (dappstore, ${VERSION_NAME}+${VERSION_CODE})"
+  ensure_android_signing
+  local define_args
+  define_args="$(dart_define_args)"
+  # shellcheck disable=SC2086
+  flutter build apk --flavor dappstore --release \
+    --target-platform android-arm64 ${define_args}
 
-Reason:
-  No Android release keystore or key.properties is configured for this repo.
-  The Gradle release buildType currently uses the debug signingConfig, which
-  must not be shipped to stores.
+  local src="build/app/outputs/flutter-apk/app-dappstore-release.apk"
+  if [[ ! -f "${src}" ]]; then
+    src="build/app/outputs/apk/dappstore/release/app-dappstore-release.apk"
+  fi
+  local dest
+  dest="$(artifact_path android-dappstore apk)"
+  copy_artifact "${src}" "${dest}"
+  verify_android_apk "${dest}"
+}
 
-When ready:
-  1. Create a release keystore and android/key.properties (do not commit secrets).
-  2. Wire signingConfigs.release in android/app/build.gradle.kts.
-  3. Replace this mock path with:
-       flutter build appbundle --release
-       flutter build apk --release
-  4. Copy artifacts to:
-       dist/${APP_NAME}-android-playstore-${VERSION_TAG}.aab
-       dist/${APP_NAME}-android-${VERSION_TAG}.apk
-
-Until then, omit "android" from release runs or treat this file as a no-op.
-EOF
-  ok "mock artifact → ${dest##${ROOT_DIR}/}"
+build_android() {
+  build_android_playstore
+  build_android_dappstore
 }
 
 # ---------------------------------------------------------------------------
@@ -479,10 +556,15 @@ Mac App Store path:
   1. open macos/Runner.xcworkspace
   2. Product → Archive → Distribute App → App Store Connect → Upload
 
-── Android (deferred) ────────────────────────────────────────────────────────
+── Android ───────────────────────────────────────────────────────────────────
 
-  No release keystore yet. Mock note only:
-    dist/${APP_NAME}-android-${VERSION_TAG}.SKIPPED.txt
+Google Play AAB:
+  dist/${APP_NAME}-android-playstore-${VERSION_TAG}.aab
+  → Play Console (com.erebrus.ai)
+
+Solana dApp Store APK:
+  dist/${APP_NAME}-android-dappstore-${VERSION_TAG}.apk
+  → Solana dApp Store publisher portal (separate signing key)
 
 ── Desktop sideload ──────────────────────────────────────────────────────────
 
@@ -516,7 +598,6 @@ print_summary() {
 
 default_targets() {
   # Platforms this host can reasonably produce.
-  # Android is listed so default runs emit the skip mock (not a signed package).
   case "$(host_os)" in
     macos)
       echo "android ios macos ubuntu windows"
@@ -537,7 +618,9 @@ list_targets() {
   cat <<EOF
 Available targets (pass as args; default = all supported on this host):
 
-  android              Mock skip note only (no release keystore yet)
+  android              Play Store AAB + dApp Store APK
+  android-playstore    Google Play App Bundle only
+  android-dappstore    Solana dApp Store APK only
   ios                  IPA for TestFlight / App Store (macOS only)
   macos                .app ZIP + version verification (macOS only)
   windows              Desktop ZIP (Windows host only; skipped elsewhere)
@@ -565,7 +648,7 @@ main() {
       --list) list_targets; exit 0 ;;
       --skip-tests) SKIP_TESTS=1; shift ;;
       --skip-verify) SKIP_VERIFY=1; shift ;;
-      android|ios|macos|windows|ubuntu|linux|all)
+      android|android-playstore|android-dappstore|ios|macos|windows|ubuntu|linux|all)
         TARGETS+=("$1"); shift ;;
       *)
         die "Unknown argument: $1 (try --help)"
@@ -609,6 +692,8 @@ main() {
     echo "────────── ${t} ──────────"
     case "$t" in
       android) build_android; ;;
+      android-playstore) build_android_playstore; ;;
+      android-dappstore) build_android_dappstore; ;;
       ios) build_ios; built_apple=1; ;;
       macos) build_macos; built_apple=1; ;;
       windows) build_windows; ;;

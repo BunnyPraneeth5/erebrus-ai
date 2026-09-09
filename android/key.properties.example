@@ -1,0 +1,15 @@
+# Copy to android/key.properties and fill in the passwords.
+# Do not commit android/key.properties or the .jks files.
+
+# --- Play Store (Google Play) ---
+playstore.storeFile=../release-keys/erebrus-ai-playstore.jks
+playstore.storePassword=<playstore-keystore-password>
+playstore.keyAlias=erebrus-ai-playstore
+playstore.keyPassword=<playstore-keystore-password>
+
+# --- dApp Store (Solana) ---
+# Must stay a separate keystore from Play Store.
+dappstore.storeFile=../release-keys/erebrus-ai-dappstore.jks
+dappstore.storePassword=<dappstore-keystore-password>
+dappstore.keyAlias=erebrus-ai-dappstore
+dappstore.keyPassword=<dappstore-keystore-password>

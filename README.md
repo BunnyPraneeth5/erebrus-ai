@@ -27,7 +27,7 @@ AI node.
 | **macOS** | Desktop server + client | Build from source — [docs/BUILD.md](docs/BUILD.md) |
 | **Windows** | Desktop server + client | Build from source — [docs/BUILD.md](docs/BUILD.md) |
 | **Linux** | Desktop server + client | Build from source — [docs/BUILD.md](docs/BUILD.md) |
-| **Android** | Client + optional server | Build from source; production signing pending |
+| **Android** | Client + optional server | Play Store AAB + dApp Store APK — [docs/BUILD.md](docs/BUILD.md) |
 | **iOS** | Client + in-app server | Build from source; TestFlight signing pending |
 | **Web** | Not supported | Browsers cannot run local LLMs in MVP |
 

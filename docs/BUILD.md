@@ -112,11 +112,29 @@ Or open `ios/Runner.xcworkspace` in Xcode, select **Any iOS Device (arm64)**, an
 ### Android
 
 ```bash
-flutter run
+flutter run                         # debug, playstore flavor by default
 ```
 
 - The `erebrusai://auth` intent filter is declared in
   `android/app/src/main/AndroidManifest.xml`.
+
+Release builds use two signing flavors (see `android/key.properties.example`):
+
+```bash
+./scripts/build-android-release.sh                 # both stores
+./scripts/build-android-release.sh playstore       # Google Play AAB
+./scripts/build-android-release.sh dappstore       # Solana dApp Store APK
+```
+
+Artifacts (version from `pubspec.yaml`):
+
+- `dist/ErebrusAI-android-playstore-vX.Y.Z.aab` — Play Console
+- `dist/ErebrusAI-android-dappstore-vX.Y.Z.apk` — Solana dApp Store
+
+```bash
+flutter build appbundle --flavor playstore --release --target-platform android-arm64
+flutter build apk --flavor dappstore --release --target-platform android-arm64
+```
 - Solana Mobile Wallet Adapter is detected at runtime on Seeker / Saga devices.
 
 ---

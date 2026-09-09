@@ -175,14 +175,32 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Android APK
-        run: flutter build apk --release
+      - name: Build Play Store AAB
+        run: flutter build appbundle --flavor playstore --release --target-platform android-arm64
 
-      - name: Upload APK
+      - name: Build dApp Store APK
+        run: flutter build apk --flavor dappstore --release --target-platform android-arm64
+
+      - name: Name Android artifacts
+        run: |
+          VERSION="$(grep -E '^version:' pubspec.yaml | awk '{print $2}')"
+          VERSION_NAME="${VERSION%%+*}"
+          mkdir -p dist
+          cp build/app/outputs/bundle/playstoreRelease/app-playstore-release.aab \
+            "dist/ErebrusAI-android-playstore-v${VERSION_NAME}.aab"
+          APK="build/app/outputs/flutter-apk/app-dappstore-release.apk"
+          if [ ! -f "$APK" ]; then
+            APK="build/app/outputs/apk/dappstore/release/app-dappstore-release.apk"
+          fi
+          cp "$APK" "dist/ErebrusAI-android-dappstore-v${VERSION_NAME}.apk"
+
+      - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
         with:
           name: android-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: |
+            dist/ErebrusAI-android-playstore-v*.aab
+            dist/ErebrusAI-android-dappstore-v*.apk
 
   release:
     name: Create GitHub Release
