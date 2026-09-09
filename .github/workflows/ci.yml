@@ -66,6 +66,11 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Pin SPM package platform
+        run: |
+          pkg="macos/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift"
+          [ -f "$pkg" ] && perl -pi -e 's/\.macOS\("[0-9.]+"\)/.macOS("14.0")/g' "$pkg" || true
+
       - name: Verify packaged llama.cpp Metal framework
         run: |
           binary=third_party/lib_llama_cpp_macos/macos/lib_llama_cpp_macos/Frameworks/lib_llama_cpp_macos.xcframework/macos-arm64_x86_64/lib_llama_cpp_macos.framework/Versions/A/lib_llama_cpp_macos
@@ -103,6 +108,11 @@ jobs:
 
       - name: Install dependencies
         run: flutter pub get
+
+      - name: Pin SPM package platform
+        run: |
+          pkg="ios/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift"
+          [ -f "$pkg" ] && perl -pi -e 's/\.iOS\("[0-9.]+"\)/.iOS("17.0")/g' "$pkg" || true
 
       - name: Verify packaged iOS llama.cpp Metal framework
         run: |
@@ -198,7 +208,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libblkid-dev liblzma-dev libsecret-1-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libblkid-dev liblzma-dev libsecret-1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -254,7 +264,9 @@ jobs:
         run: flutter pub get
 
       - name: Install pinned Android NDK for TurboQuant candidate
-        run: sdkmanager "ndk;28.2.13676358"
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358"
 
       - name: Cross-compile TurboQuant ARM64 CPU candidate
         run: |
