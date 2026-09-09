@@ -11,7 +11,7 @@ Notable user-facing changes to Erebrus AI are documented here.
 - Remove the Dock/taskbar icon and use the tray icon as the sole way to reopen
   the window; quitting remains an explicit tray-menu action.
 
-## 1.0.2+4 — 2026-08-19
+## 1.0.2+1 — 2026-08-19
 
 ### Authentication and sessions
 

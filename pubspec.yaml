@@ -2,7 +2,7 @@ name: erebrus_ai
 description: "Erebrus AI — local LLM runner. Download models, chat on-device, and serve them to your network."
 publish_to: 'none'
 
-version: 1.0.2+4
+version: 1.0.2+1
 
 environment:
   sdk: ^3.12.2
