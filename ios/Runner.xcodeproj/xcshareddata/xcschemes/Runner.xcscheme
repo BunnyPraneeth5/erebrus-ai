@@ -10,7 +10,7 @@
             ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
             <ActionContent
                title = "Run Prepare Flutter Framework Script"
-               scriptText = "/bin/sh &quot;$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh&quot; prepare&#10;">
+               scriptText = "PKG=&quot;${SRCROOT}/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift&quot;&#10;pin_spm() { [ -f &quot;$PKG&quot; ] &amp;&amp; /usr/bin/perl -pi -e 's/\.iOS\(&quot;[0-9.]+&quot;\)/.iOS(&quot;17.0&quot;)/g' &quot;$PKG&quot;; }&#10;pin_spm&#10;&quot;$FLUTTER_ROOT&quot;/packages/flutter_tools/bin/xcode_backend.sh prepare&#10;pin_spm&#10;">
                <EnvironmentBuildable>
                   <BuildableReference
                      BuildableIdentifier = "primary"

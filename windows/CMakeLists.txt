@@ -122,13 +122,15 @@ if(EREBRUS_TURBOQUANT_SERVER)
     PROGRAMS "${EREBRUS_TURBOQUANT_SERVER}"
     DESTINATION "erebrus_turboquant"
     COMPONENT Runtime
+    OPTIONAL
   )
   install(
     FILES "${EREBRUS_TURBOQUANT_MANIFEST}"
     DESTINATION "erebrus_turboquant"
     COMPONENT Runtime
+    OPTIONAL
   )
 endif()
-if(TARGET erebrus_turboquant_runtime AND TARGET INSTALL)
-  add_dependencies(INSTALL erebrus_turboquant_runtime)
+if(TARGET erebrus_turboquant_runtime)
+  add_dependencies(${BINARY_NAME} erebrus_turboquant_runtime)
 endif()
