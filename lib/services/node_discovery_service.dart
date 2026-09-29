@@ -311,7 +311,8 @@ class DiscoveredNode {
   String toString() => '$name @ $host:$port';
 }
 
-/// Everything needed to address one model on a discovered Erebrus peer.
+/// Everything needed to address one model on a discovered Erebrus peer or a
+/// user-configured connection.
 class NetworkModelTarget {
   const NetworkModelTarget({
     required this.nodeId,
@@ -321,6 +322,12 @@ class NetworkModelTarget {
     required this.accessToken,
     required this.modelId,
     required this.modelName,
+    this.apiBase,
+    this.requiresAccessToken = true,
+    this.extraHeaders = const {},
+    this.maxTokensLimit,
+    this.acceptsLlamaSampling = true,
+    this.isConnection = false,
   });
 
   final String nodeId;
@@ -331,14 +338,35 @@ class NetworkModelTarget {
   final String modelId;
   final String modelName;
 
+  /// OpenAI base such as `https://api.openai.com/v1`. Discovered nodes leave
+  /// this null and are addressed as `http://host:port/v1`.
+  final Uri? apiBase;
+  final bool requiresAccessToken;
+  final Map<String, String> extraHeaders;
+  final int? maxTokensLimit;
+  final bool acceptsLlamaSampling;
+  final bool isConnection;
+
   String get selectionKey => '$nodeId::$modelId';
 
-  Uri get chatCompletionsUri => Uri(
-    scheme: 'http',
-    host: host,
-    port: port,
-    pathSegments: const ['v1', 'chat', 'completions'],
-  );
+  Uri get chatCompletionsUri {
+    final base = apiBase;
+    if (base == null) {
+      return Uri(
+        scheme: 'http',
+        host: host,
+        port: port,
+        pathSegments: const ['v1', 'chat', 'completions'],
+      );
+    }
+    return base.replace(
+      pathSegments: [
+        ...base.pathSegments.where((segment) => segment.isNotEmpty),
+        'chat',
+        'completions',
+      ],
+    );
+  }
 }
 
 class DiscoveredNodeModel {

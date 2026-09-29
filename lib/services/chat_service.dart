@@ -8,6 +8,9 @@ import 'package:uuid/uuid.dart';
 
 import '../data/catalog_service.dart';
 import '../data/mock_data.dart';
+import '../data/model_connection.dart';
+import '../data/tool_activity.dart';
+import 'connection_service.dart';
 import 'inference_service.dart';
 import 'imported_model_service.dart';
 import 'model_download_service.dart';
@@ -15,6 +18,7 @@ import 'model_package_service.dart';
 import 'network_inference_service.dart';
 import 'node_discovery_service.dart';
 import 'storage_service.dart';
+import 'tools/agent_tools.dart';
 
 /// A real chat session and message store.
 ///
@@ -153,6 +157,7 @@ class ChatService extends ChangeNotifier {
     String? modelId,
     String? networkNodeId,
     MockPersona? persona,
+    bool webTools = false,
   }) async {
     if (text.trim().isEmpty) return;
     if (activeSession == null) await newSession();
@@ -196,6 +201,7 @@ class ChatService extends ChangeNotifier {
       modelId: resolvedModel,
       networkNodeId: resolvedNetworkNodeId,
       persona: persona,
+      webTools: webTools,
     );
   }
 
@@ -206,41 +212,52 @@ class ChatService extends ChangeNotifier {
     required String modelId,
     required String networkNodeId,
     MockPersona? persona,
+    bool webTools = false,
   }) async {
     final raw = StringBuffer();
+    assistant.activity.clear();
+    assistant.sources.clear();
     try {
-      final stream = await _infer(
-        modelId,
-        prompt,
-        persona,
-        networkNodeId: networkNodeId,
-      );
-      await for (final chunk in stream) {
-        raw.write(chunk);
-        assistant.text = sanitizeAssistantText(raw.toString());
-        if (networkNodeId.isEmpty) {
-          assistant.tokensPerSecond =
-              InferenceService.instance.currentTokensPerSecond;
-        }
-        notifyListeners();
+      final tools = webTools ? availableAgentTools() : const <AgentTool>[];
+      final target = networkNodeId.isEmpty
+          ? null
+          : resolveNetworkTarget(networkNodeId, modelId);
+      if (tools.isNotEmpty && target != null && target.isConnection) {
+        await _generateWithTools(
+          sid: sid,
+          assistant: assistant,
+          prompt: prompt,
+          target: target,
+          tools: tools,
+          persona: persona,
+          raw: raw,
+        );
+      } else {
+        await _generatePlain(
+          sid: sid,
+          assistant: assistant,
+          prompt: prompt,
+          modelId: modelId,
+          networkNodeId: networkNodeId,
+          persona: persona,
+          raw: raw,
+        );
       }
-      assistant.text = sanitizeAssistantText(raw.toString());
-      if (networkNodeId.isEmpty) {
-        assistant.tokensPerSecond =
-            InferenceService.instance.lastTokensPerSecond ??
-            assistant.tokensPerSecond;
-        assistant.truncated = InferenceService.instance.lastOutputWasTruncated;
-      }
+    } on ModelNotLoadedException catch (e) {
+      assistant.text = e.message;
     } catch (e) {
-      assistant.text = networkNodeId.isEmpty
+      final failure = networkNodeId.isEmpty
           ? 'Local inference failed: $e'
           : 'Network inference failed: $e';
+      // Keep any partial answer from a tool-using turn above the error.
+      assistant.text = assistant.text.trim().isEmpty
+          ? failure
+          : '${assistant.text.trim()}\n\n$failure';
     }
     assistant.streaming = false;
-    final node = NodeDiscoveryService.instance.nodeById(networkNodeId);
     assistant.meta = networkNodeId.isEmpty
         ? 'LOCAL'
-        : 'NETWORK · ${node?.name ?? 'LAN NODE'}';
+        : 'NETWORK · ${networkSourceName(networkNodeId) ?? 'LAN NODE'}';
     notifyListeners();
     await _persist(sid);
   }
@@ -250,6 +267,7 @@ class ChatService extends ChangeNotifier {
   Future<void> regenerate(
     String assistantMessageId, {
     MockPersona? persona,
+    bool webTools = false,
   }) async {
     if (InferenceService.instance.isGenerating ||
         NetworkInferenceService.instance.isGenerating) {
@@ -280,6 +298,7 @@ class ChatService extends ChangeNotifier {
       modelId: session.modelId,
       networkNodeId: session.networkNodeId,
       persona: persona,
+      webTools: webTools,
     );
   }
 
@@ -288,24 +307,25 @@ class ChatService extends ChangeNotifier {
     String prompt,
     MockPersona? persona, {
     required String networkNodeId,
+    List<NetworkChatTurn> history = const [],
   }) async {
     if (kIsWeb || _inTest) {
       return Stream.fromIterable(['Test mode: no inference.']);
     }
 
     if (networkNodeId.isNotEmpty) {
-      final target = NodeDiscoveryService.instance.targetFor(
-        networkNodeId,
-        modelId,
-      );
+      final target = resolveNetworkTarget(networkNodeId, modelId);
       if (target == null) {
-        throw const NetworkInferenceException(
-          'The selected node is no longer available. Make sure both devices are on the same Wi-Fi, keep LAN sharing enabled, and rescan Models.',
+        throw NetworkInferenceException(
+          networkNodeId.startsWith(ModelConnection.nodeIdPrefix)
+              ? 'This connection or model was removed or disabled. Pick another model or check Settings → Connections.'
+              : 'The selected node is no longer available. Make sure both devices are on the same Wi-Fi, keep LAN sharing enabled, and rescan Models.',
         );
       }
       return NetworkInferenceService.instance.generate(
         target: target,
         prompt: prompt,
+        history: history,
         systemPrompt: persona?.systemPrompt ?? '',
         maxOutputTokens: persona?.maxTokens ?? 768,
         temperature: persona?.temperature ?? 0.7,
@@ -331,6 +351,12 @@ class ChatService extends ChangeNotifier {
       ]);
     }
 
+    // On-device models load only when the user presses Load (chat header);
+    // the LAN server path still loads on demand for remote clients.
+    if (!InferenceService.instance.isLoaded(modelId)) {
+      throw const ModelNotLoadedException();
+    }
+
     try {
       return InferenceService.instance.generate(
         modelId: modelId,
@@ -349,6 +375,135 @@ class ChatService extends ChangeNotifier {
     } catch (e) {
       return Stream.fromIterable(['Local inference failed: $e']);
     }
+  }
+
+  Future<void> _generatePlain({
+    required String sid,
+    required ChatMessage assistant,
+    required String prompt,
+    required String modelId,
+    required String networkNodeId,
+    required MockPersona? persona,
+    required StringBuffer raw,
+  }) async {
+    final stream = await _infer(
+      modelId,
+      prompt,
+      persona,
+      networkNodeId: networkNodeId,
+      history: networkNodeId.isEmpty
+          ? const []
+          : _historyBefore(sid, assistant),
+    );
+    await for (final chunk in stream) {
+      raw.write(chunk);
+      assistant.text = sanitizeAssistantText(raw.toString());
+      if (networkNodeId.isEmpty) {
+        assistant.tokensPerSecond =
+            InferenceService.instance.currentTokensPerSecond;
+      }
+      notifyListeners();
+    }
+    assistant.text = sanitizeAssistantText(raw.toString());
+    if (networkNodeId.isEmpty) {
+      assistant.tokensPerSecond =
+          InferenceService.instance.lastTokensPerSecond ??
+          assistant.tokensPerSecond;
+      assistant.truncated = InferenceService.instance.lastOutputWasTruncated;
+    }
+  }
+
+  /// Runs one tool-using turn against a connection model, streaming text and
+  /// recording each tool step and consulted source on [assistant].
+  Future<void> _generateWithTools({
+    required String sid,
+    required ChatMessage assistant,
+    required String prompt,
+    required NetworkModelTarget target,
+    required List<AgentTool> tools,
+    required MockPersona? persona,
+    required StringBuffer raw,
+  }) async {
+    final context = AgentRunContext();
+    var separate = false;
+    await for (final event
+        in NetworkInferenceService.instance.generateWithTools(
+          target: target,
+          prompt: prompt,
+          tools: tools,
+          context: context,
+          systemPrompt: persona?.systemPrompt ?? '',
+          history: _historyBefore(sid, assistant),
+          maxOutputTokens: persona?.maxTokens ?? 768,
+          temperature: persona?.temperature ?? 0.7,
+          topP: persona?.topP ?? 0.9,
+          repeatPenalty: persona?.repeatPenalty ?? 1.1,
+          stop: _stopSequences(persona),
+        )) {
+      switch (event) {
+        case AgentTextDelta(:final text):
+          // Text after a tool step starts a new paragraph.
+          if (separate && raw.toString().trim().isNotEmpty) raw.write('\n\n');
+          separate = false;
+          raw.write(text);
+          assistant.text = sanitizeAssistantText(raw.toString());
+        case AgentToolStarted(:final id, :final name, :final label):
+          assistant.activity.add(
+            ToolActivity(id: id, name: name, label: label),
+          );
+          separate = true;
+        case AgentToolFinished(:final id, :final outcome):
+          final step = assistant.activity
+              .where((activity) => activity.id == id)
+              .lastOrNull;
+          if (step != null) {
+            step
+              ..status = outcome.isError
+                  ? ToolActivityStatus.failed
+                  : ToolActivityStatus.done
+              ..summary = outcome.summary
+              ..label = _pastTense(step.label);
+          }
+          assistant.sources
+            ..clear()
+            ..addAll(context.sources);
+      }
+      notifyListeners();
+    }
+    assistant.text = sanitizeAssistantText(raw.toString());
+  }
+
+  static String _pastTense(String label) => label
+      .replaceFirst('Searching', 'Searched')
+      .replaceFirst('Reading', 'Read');
+
+  static List<String> _stopSequences(MockPersona? persona) =>
+      (persona?.stopSequences ?? '')
+          .split(RegExp(r'[\n,]'))
+          .map((value) => value.trim())
+          .where((value) => value.isNotEmpty)
+          .toList();
+
+  /// Prior completed turns (excluding the prompt being answered) for servers
+  /// that accept multi-turn context. Capped to keep requests small.
+  List<NetworkChatTurn> _historyBefore(String sid, ChatMessage assistant) {
+    final messages = _messages[sid] ?? const <ChatMessage>[];
+    final assistantIndex = messages.indexOf(assistant);
+    if (assistantIndex <= 0) return const [];
+    // The user prompt sits right before the assistant placeholder.
+    final prior = messages.sublist(0, assistantIndex - 1);
+    final turns = [
+      for (final message in prior)
+        if (!message.streaming && message.text.trim().isNotEmpty)
+          NetworkChatTurn(
+            role: message.isUser ? 'user' : 'assistant',
+            content: message.text,
+          ),
+    ];
+    const maxTurns = 20;
+    return turns.length > maxTurns
+        ? turns.sublist(turns.length - maxTurns)
+        : turns;
   }
 
   void _updateSessionTitle(String sid, String text) {
@@ -433,7 +588,10 @@ class ChatMessage {
     this.meta,
     this.tokensPerSecond,
     this.truncated = false,
-  });
+    List<ToolActivity>? activity,
+    List<SourceRef>? sources,
+  }) : activity = activity ?? [],
+       sources = sources ?? [];
 
   final String id;
   final bool isUser;
@@ -442,6 +600,12 @@ class ChatMessage {
   String? meta;
   double? tokensPerSecond;
   bool truncated;
+
+  /// Tool steps taken while answering (web searches, page reads).
+  final List<ToolActivity> activity;
+
+  /// Web pages cited by the answer, numbered to match its [n] references.
+  final List<SourceRef> sources;
 
   ChatMessage.user(String text)
     : this(id: const Uuid().v4(), isUser: true, text: text);
@@ -459,6 +623,14 @@ class ChatMessage {
     meta: json['meta'] as String?,
     tokensPerSecond: (json['tokens_per_second'] as num?)?.toDouble(),
     truncated: json['truncated'] as bool? ?? false,
+    activity: [
+      for (final item in json['activity'] as List? ?? const [])
+        if (item is Map) ToolActivity.fromJson(item.cast<String, dynamic>()),
+    ],
+    sources: [
+      for (final item in json['sources'] as List? ?? const [])
+        if (item is Map) SourceRef.fromJson(item.cast<String, dynamic>()),
+    ],
   );
 
   Map<String, dynamic> toJson() => {
@@ -469,6 +641,10 @@ class ChatMessage {
     'meta': meta,
     if (tokensPerSecond != null) 'tokens_per_second': tokensPerSecond,
     if (truncated) 'truncated': true,
+    if (activity.isNotEmpty)
+      'activity': activity.map((step) => step.toJson()).toList(),
+    if (sources.isNotEmpty)
+      'sources': sources.map((source) => source.toJson()).toList(),
   };
 }
 
@@ -492,4 +668,16 @@ String sanitizeAssistantText(String text) {
   );
   result = result.replaceAll(RegExp(r'</?think>', caseSensitive: false), '');
   return result.trimLeft();
+}
+
+/// Raised when chatting with an on-device model that has not been loaded.
+class ModelNotLoadedException implements Exception {
+  const ModelNotLoadedException();
+
+  String get message =>
+      'This model is not loaded. Press Load next to the model name to start '
+      'chatting, and Eject to free its memory when you are done.';
+
+  @override
+  String toString() => message;
 }

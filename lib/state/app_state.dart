@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../auth/entitlement_state.dart';
 import '../services/model_download_service.dart';
 import '../services/imported_model_service.dart';
+import '../services/inference_service.dart';
 import '../services/model_package_service.dart';
 import '../services/storage_service.dart';
 import '../navigation/shell_tab.dart';
@@ -17,9 +18,12 @@ import '../auth/wallet_auth_controller.dart';
 import '../org/ai_org.dart';
 import '../org/org_state.dart';
 import '../org/shared_model.dart';
+import '../data/model_connection.dart';
+import '../services/connection_service.dart';
 import '../services/local_server_service.dart';
 import '../services/node_discovery_service.dart';
 import '../services/power_service.dart';
+import '../services/tools/web_tools.dart';
 import '../services/persona_service.dart';
 import '../data/mock_data.dart';
 
@@ -34,6 +38,8 @@ class AppState extends ChangeNotifier {
     orgState.addListener(_onOrgChanged);
     LocalServerService.instance.addListener(_onServerChanged);
     NodeDiscoveryService.instance.addListener(_onDiscoveryChanged);
+    ConnectionService.instance.addListener(_onDiscoveryChanged);
+    WebTools.instance.addListener(_onDiscoveryChanged);
     _syncFromAuth();
     unawaited(_loadLocalSettings());
   }
@@ -71,9 +77,55 @@ class AppState extends ChangeNotifier {
 
   bool get isNetworkModelSelected => selectedNetworkNodeId.isNotEmpty;
 
-  NetworkModelTarget? get selectedNetworkModelTarget => NodeDiscoveryService
-      .instance
-      .targetFor(selectedNetworkNodeId, selectedModelId);
+  /// A downloaded on-device model is selected. These are loaded and ejected
+  /// explicitly by the user; network models are always ready.
+  bool get selectedModelIsLocal =>
+      !isNetworkModelSelected &&
+      selectedModelId.isNotEmpty &&
+      isSelectedModelReady;
+
+  /// The selected on-device model is in memory and can chat.
+  bool get selectedModelLoaded =>
+      InferenceService.instance.isLoaded(selectedModelId);
+
+  /// Loads the selected on-device model; returns an error message or null.
+  Future<String?> loadSelectedModel() async {
+    if (!selectedModelIsLocal) return 'Select a downloaded model first';
+    try {
+      await InferenceService.instance.load(selectedModelId);
+      return null;
+    } on InferenceException catch (error) {
+      return error.message;
+    } on Object catch (error) {
+      return error.toString();
+    }
+  }
+
+  /// Frees the on-device model's memory. Waits for nothing: callers disable
+  /// eject while a response is generating.
+  Future<void> ejectModel() => InferenceService.instance.unload();
+
+  /// The chat's web-search switch (composer globe). Remembered on device.
+  bool webSearchInChat = false;
+
+  /// Tools currently run only for Connection models, which speak the
+  /// OpenAI tool-calling protocol.
+  bool get selectedModelSupportsTools =>
+      selectedNetworkModelTarget?.isConnection == true;
+
+  /// Web search will actually be offered on the next message.
+  bool get webSearchActive =>
+      webSearchInChat && WebTools.instance.isReady && selectedModelSupportsTools;
+
+  Future<void> setWebSearchInChat(bool value) async {
+    webSearchInChat = value;
+    notifyListeners();
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setBool('chat_web_search', value);
+  }
+
+  NetworkModelTarget? get selectedNetworkModelTarget =>
+      resolveNetworkTarget(selectedNetworkNodeId, selectedModelId);
 
   /// True when the selected model is runnable locally or reachable on LAN.
   bool get isSelectedModelReady =>
@@ -260,6 +312,7 @@ class AppState extends ChangeNotifier {
     try {
       final preferences = await SharedPreferences.getInstance();
       onboarded = preferences.getBool('onboarding_complete') ?? false;
+      webSearchInChat = preferences.getBool('chat_web_search') ?? false;
       final saved = preferences.getInt('max_response_tokens');
       if (saved != null) {
         responseTokenOverride = saved.clamp(128, responseTokenLimit);
@@ -309,6 +362,16 @@ class AppState extends ChangeNotifier {
     selectedModelVariantId = '';
     selectedModelQuant = 'NETWORK';
     selectedNetworkNodeId = node.id;
+    notifyListeners();
+    unawaited(_persistActiveModel());
+  }
+
+  void selectConnectionModel(ModelConnection connection, String modelId) {
+    selectedModel = modelId;
+    selectedModelId = modelId;
+    selectedModelVariantId = '';
+    selectedModelQuant = connection.provider.isLocal ? 'NETWORK' : 'CLOUD';
+    selectedNetworkNodeId = connection.nodeId;
     notifyListeners();
     unawaited(_persistActiveModel());
   }
@@ -390,6 +453,8 @@ class AppState extends ChangeNotifier {
     orgState.removeListener(_onOrgChanged);
     LocalServerService.instance.removeListener(_onServerChanged);
     NodeDiscoveryService.instance.removeListener(_onDiscoveryChanged);
+    ConnectionService.instance.removeListener(_onDiscoveryChanged);
+    WebTools.instance.removeListener(_onDiscoveryChanged);
     super.dispose();
   }
 }

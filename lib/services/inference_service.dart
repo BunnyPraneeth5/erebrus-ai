@@ -38,6 +38,7 @@ class InferenceService extends ChangeNotifier {
   late final InferenceCoordinator _coordinator;
   String? _activeModelId;
   bool _generating = false;
+  bool _loading = false;
   double? _currentTokensPerSecond;
   double? _lastTokensPerSecond;
   bool _lastOutputWasTruncated = false;
@@ -46,6 +47,11 @@ class InferenceService extends ChangeNotifier {
   bool get hasLoadedModel =>
       _activeModelId != null && _coordinator.activeBackend != null;
   bool get isGenerating => _generating;
+  bool get isLoading => _loading;
+
+  /// Whether [modelId] is resident in memory right now.
+  bool isLoaded(String modelId) =>
+      modelId.isNotEmpty && hasLoadedModel && _activeModelId == modelId;
   double? get currentTokensPerSecond => _currentTokensPerSecond;
   double? get lastTokensPerSecond => _lastTokensPerSecond;
   bool get lastOutputWasTruncated => _lastOutputWasTruncated;
@@ -108,88 +114,14 @@ class InferenceService extends ChangeNotifier {
     );
 
     try {
-      final plans = <InferenceExecutionPlan>[];
-      final ordered = [...installed]
-        ..sort(
-          (left, right) =>
-              _backendPriority(left).compareTo(_backendPriority(right)),
-        );
-      for (final record in ordered) {
-        final packagePath = await ModelPackageService.instance.packagePath(
-          record.variantId,
-        );
-        if (packagePath == null) continue;
-        final variant = _variantFromInstalled(record, profile.platform);
-        for (final backend in _orderedBackends(record, profile.platform)) {
-          final memoryPlan = memoryPolicy.plan(
-            device: profile,
-            backend: backend,
-          );
-          plans.add(
-            InferenceExecutionPlan(
-              backend: backend,
-              loadRequest: InferenceLoadRequest(
-                variant: variant,
-                packagePath: packagePath,
-                contextSize: memoryPlan.contextSize,
-                gpuLayerCount: memoryPlan.gpuLayerCount,
-              ),
-            ),
-          );
-        }
-      }
-      if (imported != null) {
-        final variant = _variantFromImported(imported, profile.platform);
-        final importedBackends = imported.format.toLowerCase() == 'mlx'
-            ? const [BackendKind.mlx]
-            : _desktopGgufBackends(profile.platform);
-        for (final backend in importedBackends) {
-          final backendMemoryPlan = memoryPolicy.plan(
-            device: profile,
-            backend: backend,
-          );
-          plans.add(
-            InferenceExecutionPlan(
-              backend: backend,
-              loadRequest: InferenceLoadRequest(
-                variant: variant,
-                packagePath: imported.path,
-                contextSize: backendMemoryPlan.contextSize,
-                gpuLayerCount: backendMemoryPlan.gpuLayerCount,
-              ),
-            ),
-          );
-        }
-      }
-      if (legacyPath != null &&
-          !plans.any(
-            (plan) =>
-                plan.backend == BackendKind.llamaCpp &&
-                plan.loadRequest.packagePath == legacyPath,
-          )) {
-        final legacyVariant = _legacyVariant(
-          modelId,
-          legacyPath,
-          profile.platform,
-        );
-        for (final backend in _desktopGgufBackends(profile.platform)) {
-          final backendMemoryPlan = memoryPolicy.plan(
-            device: profile,
-            backend: backend,
-          );
-          plans.add(
-            InferenceExecutionPlan(
-              backend: backend,
-              loadRequest: InferenceLoadRequest(
-                variant: legacyVariant,
-                packagePath: legacyPath,
-                contextSize: backendMemoryPlan.contextSize,
-                gpuLayerCount: backendMemoryPlan.gpuLayerCount,
-              ),
-            ),
-          );
-        }
-      }
+      final plans = await _plansFor(
+        installed: installed,
+        imported: imported,
+        legacyPath: legacyPath,
+        profile: profile,
+        memoryPolicy: memoryPolicy,
+        modelId: modelId,
+      );
       final events = _coordinator.generate(
         plans: plans,
         request: InferenceRequest(
@@ -238,6 +170,137 @@ class InferenceService extends ChangeNotifier {
       throw InferenceException(_friendlyError(error.toString()));
     } finally {
       _generating = false;
+      notifyListeners();
+    }
+  }
+
+  Future<List<InferenceExecutionPlan>> _plansFor({
+    required List<InstalledModel> installed,
+    required ImportedModel? imported,
+    required String? legacyPath,
+    required DeviceProfile profile,
+    required InferenceMemoryPolicy memoryPolicy,
+    required String modelId,
+  }) async {
+    final plans = <InferenceExecutionPlan>[];
+    final ordered = [...installed]
+      ..sort(
+        (left, right) =>
+            _backendPriority(left).compareTo(_backendPriority(right)),
+      );
+    for (final record in ordered) {
+      final packagePath = await ModelPackageService.instance.packagePath(
+        record.variantId,
+      );
+      if (packagePath == null) continue;
+      final variant = _variantFromInstalled(record, profile.platform);
+      for (final backend in _orderedBackends(record, profile.platform)) {
+        final memoryPlan = memoryPolicy.plan(device: profile, backend: backend);
+        plans.add(
+          InferenceExecutionPlan(
+            backend: backend,
+            loadRequest: InferenceLoadRequest(
+              variant: variant,
+              packagePath: packagePath,
+              contextSize: memoryPlan.contextSize,
+              gpuLayerCount: memoryPlan.gpuLayerCount,
+            ),
+          ),
+        );
+      }
+    }
+    if (imported != null) {
+      final variant = _variantFromImported(imported, profile.platform);
+      final importedBackends = imported.format.toLowerCase() == 'mlx'
+          ? const [BackendKind.mlx]
+          : _desktopGgufBackends(profile.platform);
+      for (final backend in importedBackends) {
+        final backendMemoryPlan = memoryPolicy.plan(
+          device: profile,
+          backend: backend,
+        );
+        plans.add(
+          InferenceExecutionPlan(
+            backend: backend,
+            loadRequest: InferenceLoadRequest(
+              variant: variant,
+              packagePath: imported.path,
+              contextSize: backendMemoryPlan.contextSize,
+              gpuLayerCount: backendMemoryPlan.gpuLayerCount,
+            ),
+          ),
+        );
+      }
+    }
+    if (legacyPath != null &&
+        !plans.any(
+          (plan) =>
+              plan.backend == BackendKind.llamaCpp &&
+              plan.loadRequest.packagePath == legacyPath,
+        )) {
+      final legacyVariant = _legacyVariant(
+        modelId,
+        legacyPath,
+        profile.platform,
+      );
+      for (final backend in _desktopGgufBackends(profile.platform)) {
+        final backendMemoryPlan = memoryPolicy.plan(
+          device: profile,
+          backend: backend,
+        );
+        plans.add(
+          InferenceExecutionPlan(
+            backend: backend,
+            loadRequest: InferenceLoadRequest(
+              variant: legacyVariant,
+              packagePath: legacyPath,
+              contextSize: backendMemoryPlan.contextSize,
+              gpuLayerCount: backendMemoryPlan.gpuLayerCount,
+            ),
+          ),
+        );
+      }
+    }
+    return plans;
+  }
+
+  /// Loads [modelId] into memory without generating, so the first request is
+  /// fast. Used by Settings and by the LAN `/v1/models/load` endpoint.
+  Future<void> load(String modelId) async {
+    if (_generating) {
+      throw const InferenceException(
+        'Wait for the current response to finish before loading a model.',
+      );
+    }
+    final profile = DeviceInfoService.detect();
+    final installed = ModelPackageService.instance.runnableVariantsForModelId(
+      modelId,
+    );
+    final imported = ImportedModelService.instance.byId(modelId);
+    final legacyPath = await ModelDownloadService.instance.modelPath(modelId);
+    if (installed.isEmpty && legacyPath == null && imported == null) {
+      throw InferenceException(
+        'Model "$modelId" is not downloaded on this device.',
+      );
+    }
+    final plans = await _plansFor(
+      installed: installed,
+      imported: imported,
+      legacyPath: legacyPath,
+      profile: profile,
+      memoryPolicy: const InferenceMemoryPolicy(),
+      modelId: modelId,
+    );
+    _loading = true;
+    notifyListeners();
+    try {
+      final failure = await _coordinator.preload(plans);
+      if (failure != null) {
+        throw InferenceException(_friendlyError(failure));
+      }
+      _activeModelId = modelId;
+    } finally {
+      _loading = false;
       notifyListeners();
     }
   }

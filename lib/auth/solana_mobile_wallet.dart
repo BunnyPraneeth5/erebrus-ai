@@ -1,4 +1,3 @@
-import 'dart:async' show unawaited;
 import 'dart:convert';
 import 'dart:io' show Platform;
 
@@ -66,9 +65,25 @@ Future<({LocalAssociationScenario scenario, MobileWalletAdapterClient client})>
 _openMwaSession() async {
   final scenario = await LocalAssociationScenario.create();
   // Must not await — start() must listen while the wallet activity is open.
-  unawaited(scenario.startActivityForResult(null));
+  // The activity future completes when the wallet closes; if that happens
+  // before association (no wallet app, or the user backed out), start()
+  // would wait forever, so the two race and the early close becomes an error.
+  final walletClosed = scenario
+      .startActivityForResult(null)
+      .then<MobileWalletAdapterClient>(
+        (_) => throw MwaException('The wallet closed before connecting'),
+        onError: (Object error) => throw MwaException(
+          'No compatible Solana wallet could be opened: $error',
+        ),
+      );
   debugPrint('[MWA] waiting for wallet association…');
-  final client = await scenario.start();
+  final MobileWalletAdapterClient client;
+  try {
+    client = await Future.any([scenario.start(), walletClosed]);
+  } catch (_) {
+    await scenario.close();
+    rethrow;
+  }
   debugPrint('[MWA] wallet associated');
   return (scenario: scenario, client: client);
 }

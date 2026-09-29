@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:bonsoir/bonsoir.dart';
 import 'package:flutter/foundation.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
@@ -213,11 +214,16 @@ class LocalServerService extends ChangeNotifier {
     final method = request.method;
 
     if (method == 'GET' && path == 'health') {
+      final package = await PackageInfo.fromPlatform();
       return _jsonResponse({
         'status': 'ok',
         'name': 'Erebrus AI',
-        'version': '1.0.0',
+        'version': package.version,
         'inference_ready': true,
+        'loaded_model': InferenceService.instance.hasLoadedModel
+            ? InferenceService.instance.activeModelId
+            : null,
+        'model_control': true,
       });
     }
 
@@ -238,9 +244,16 @@ class LocalServerService extends ChangeNotifier {
           'format':
               imported?.format ?? catalog?.preferredVariant?.format ?? 'gguf',
           'quantization': imported?.quantization ?? catalog?.quant ?? '',
+          'status': {'value': _modelState(id)},
+          'loaded': _modelState(id) == 'loaded',
         };
       }).toList();
       return _jsonResponse({'object': 'list', 'data': models});
+    }
+
+    if (method == 'POST' &&
+        (path == 'v1/models/load' || path == 'v1/models/unload')) {
+      return _handleModelControl(request, load: path == 'v1/models/load');
     }
 
     if (method == 'POST' && path == 'v1/chat/completions') {
@@ -248,6 +261,71 @@ class LocalServerService extends ChangeNotifier {
     }
 
     return Response.notFound(json.encode({'error': 'Not found'}));
+  }
+
+  static String _modelState(String id) {
+    final inference = InferenceService.instance;
+    if (inference.activeModelId != id) return 'unloaded';
+    if (inference.isLoading) return 'loading';
+    return inference.hasLoadedModel ? 'loaded' : 'unloaded';
+  }
+
+  /// `POST /v1/models/load` and `/v1/models/unload` with `{"model": id}`,
+  /// matching llama-server's router-mode contract so any client can manage
+  /// which model this node keeps in memory.
+  Future<Response> _handleModelControl(
+    Request request, {
+    required bool load,
+  }) async {
+    late final String body;
+    try {
+      body = await readBoundedLocalServerBody(request, maxBytes: 16 * 1024);
+    } on LocalServerPayloadTooLarge {
+      return _payloadTooLargeResponse();
+    }
+    Object? payload;
+    try {
+      payload = body.trim().isEmpty ? const {} : json.decode(body);
+    } on FormatException {
+      payload = null;
+    }
+    final modelId = payload is Map ? payload['model']?.toString() ?? '' : '';
+    final inference = InferenceService.instance;
+    if (inference.isGenerating) {
+      return _jsonResponse({
+        'error': {
+          'message': 'This node is generating a response. Try again shortly.',
+          'type': 'busy',
+        },
+      }, status: 409);
+    }
+    try {
+      if (load) {
+        if (!_servableModelIds.contains(modelId)) {
+          return _jsonResponse({
+            'error': {
+              'message': 'Model $modelId is not available on this node.',
+              'type': 'model_not_found',
+            },
+          }, status: 404);
+        }
+        await inference.load(modelId);
+      } else if (modelId.isEmpty || inference.activeModelId == modelId) {
+        await inference.unload();
+      }
+      return _jsonResponse({
+        'success': true,
+        'model': modelId,
+        'status': {
+          'value': modelId.isEmpty ? 'unloaded' : _modelState(modelId),
+        },
+      });
+    } catch (e) {
+      final msg = e is InferenceException ? e.message : e.toString();
+      return _jsonResponse({
+        'error': {'message': msg, 'type': 'inference_error'},
+      }, status: 500);
+    }
   }
 
   Future<Response> _handleChatCompletion(Request request) async {

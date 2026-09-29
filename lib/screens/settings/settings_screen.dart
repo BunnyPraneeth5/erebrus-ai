@@ -5,10 +5,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:material_symbols_icons/symbols.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../state/app_state.dart';
-import '../../services/speech_service.dart';
 import '../../services/backend_probe_service.dart';
+import '../../services/device_info_service.dart';
+import '../../services/inference_contract.dart';
+import '../../services/inference_memory_policy.dart';
+import '../../services/inference_service.dart';
 import '../../services/local_server_service.dart';
 import '../../services/on_device_diagnostics_service.dart';
 import '../../services/storage_service.dart';
@@ -17,261 +21,837 @@ import '../../org/ai_org.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_text.dart';
 import '../../widgets/ere_controls.dart';
+import '../../widgets/settings_kit.dart';
 import '../../widgets/settings_rows.dart';
 import '../auth/sign_in.dart';
 import '../personas/personas_screen.dart';
+import 'connections_settings.dart';
 import 'pair_sheet.dart';
+import 'tools_settings.dart';
+import 'voice_settings.dart';
 
-class SettingsScreen extends StatelessWidget {
+/// Settings sections, in sidebar order. [keywords] feed the search box so a
+/// query like "api key" or "whisper" finds the section that holds it.
+enum SettingsSection {
+  account(
+    'Account',
+    Symbols.account_circle,
+    'Profile, organizations and invites',
+    [
+      'profile',
+      'sign in',
+      'sign out',
+      'organization',
+      'workspace',
+      'referral',
+      'invite',
+      'xp',
+      'wallet',
+    ],
+  ),
+  general(
+    'General',
+    Symbols.settings,
+    'Inference defaults, loaded model and personas',
+    [
+      'context',
+      'response length',
+      'tokens',
+      'backend',
+      'persona',
+      'memory',
+      'load',
+      'offload',
+      'unload',
+    ],
+  ),
+  server('Local server', Symbols.dns, 'OpenAI-compatible API and LAN sharing', [
+    'api',
+    'port',
+    'key',
+    'pair',
+    'qr',
+    'lan',
+    'serve',
+    'network',
+    'models folder',
+    'mdns',
+  ]),
+  connections(
+    'Connections',
+    Symbols.cloud,
+    'Remote model servers and cloud providers',
+    [
+      'llama.cpp',
+      'ollama',
+      'lm studio',
+      'vllm',
+      'openai',
+      'anthropic',
+      'openrouter',
+      'endpoint',
+      'base url',
+      'remote',
+      'load',
+      'offload',
+    ],
+  ),
+  tools(
+    'Tools',
+    Symbols.travel_explore,
+    'Web search and page reading for models',
+    [
+      'web',
+      'internet',
+      'search',
+      'searxng',
+      'brave',
+      'tavily',
+      'tool',
+      'tool calling',
+      'fetch',
+      'browse',
+    ],
+  ),
+  voice(
+    'Voice',
+    Symbols.mic,
+    'Microphone, dictation, speech-to-text and read-aloud',
+    [
+      'dictation',
+      'transcription',
+      'whisper',
+      'speech',
+      'microphone',
+      'language',
+      'tts',
+      'read aloud',
+      'rate',
+      'pitch',
+    ],
+  ),
+  data(
+    'Data',
+    Symbols.database,
+    'On-device transcripts, exports and diagnostics',
+    ['export', 'delete', 'transcript', 'diagnostics', 'storage'],
+  ),
+  about('About', Symbols.help, 'Version and runtime', [
+    'version',
+    'build',
+    'llama',
+  ]);
+
+  const SettingsSection(this.title, this.icon, this.subtitle, this.keywords);
+
+  final String title;
+  final IconData icon;
+  final String subtitle;
+  final List<String> keywords;
+
+  bool matches(String query) {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return true;
+    return title.toLowerCase().contains(q) ||
+        subtitle.toLowerCase().contains(q) ||
+        keywords.any((keyword) => keyword.contains(q) || q.contains(keyword));
+  }
+}
+
+class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key, required this.wide});
 
   final bool wide;
 
   @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  final _search = TextEditingController();
+  SettingsSection _section = SettingsSection.account;
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  List<SettingsSection> get _visibleSections => SettingsSection.values
+      .where((section) => section.matches(_search.text))
+      .toList();
+
+  @override
   Widget build(BuildContext context) {
-    final app = AppScope.of(context);
-    final children = <Widget>[
-      Text('Settings', style: AppText.screenTitle()),
-      const SizedBox(height: 4),
-      Text(
-        'Control local inference, privacy, voice, and device storage.',
-        style: AppText.grotesk(13, color: AppColors.textSecondary),
-      ),
-      SizedBox(height: wide ? 22 : 16),
-      if (app.signedIn) ...[
-        const _AccountCard(),
-        const SizedBox(height: 14),
-        _SectionLabel('ORGANIZATIONS', wide: wide),
-        const SizedBox(height: 9),
-        const _OrganizationsCard(),
-        const SizedBox(height: 14),
-        _SectionLabel('REFERRALS', wide: wide),
-        const SizedBox(height: 9),
-        const _ReferralCard(),
-        const SizedBox(height: 14),
-        SettingsCard(
-          children: [
-            SettingsRow(
-              icon: Symbols.logout,
-              iconColor: AppColors.danger,
-              title: 'Sign out',
-              titleColor: AppColors.danger,
-              subtitle: 'Guest chats, models and personas stay on this device',
-              dense: !wide,
-              onTap: app.signOut,
-            ),
-          ],
-        ),
-      ] else
-        const _GuestPromoCard(),
-      SizedBox(height: wide ? 20 : 18),
-      _SectionLabel('LOCAL SERVER', wide: wide),
-      SizedBox(height: wide ? 9 : 8),
-      if (!kIsWeb && Platform.isIOS) ...[
-        SettingsCard(
-          children: [
-            SettingsRow(
-              icon: Symbols.info,
-              iconColor: AppColors.accentHi,
-              title: 'Keep Erebrus AI open',
-              subtitle:
-                  'On iOS, stay in the app while serving or downloading. The screen stays on automatically.',
-              dense: !wide,
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-      ],
-      if (wide)
-        SettingsCard(
-          children: [
-            SettingsRow(
-              icon: Symbols.dns,
-              title: 'Server port',
-              subtitle: 'OpenAI-compatible API on this machine',
-              trailing: [
-                RowValue('${LocalServerService.instance.port}', chevron: false),
-              ],
-            ),
-            const _ApiKeyRow(dense: false),
-            const _ModelsFolderRow(dense: false),
-            SettingsRow(
-              icon: Symbols.wifi,
-              title: 'Serve on local network',
-              subtitle:
-                  'Publish _erebrusai._tcp so other devices find this node',
-              trailing: [
-                EreToggle(value: app.serving, onChanged: app.setServing),
-              ],
-            ),
-          ],
-        )
-      else
-        SettingsCard(
-          children: [
-            SettingsRow(
-              icon: Symbols.wifi,
-              title: 'Serve while app is open',
-              subtitle: 'Other devices can use this phone’s models',
-              dense: true,
-              trailing: [
-                EreToggle(value: app.serving, onChanged: app.setServing),
-              ],
-            ),
-            SettingsRow(
-              icon: Symbols.dns,
-              title: 'Server port',
-              dense: true,
-              trailing: [
-                RowValue('${LocalServerService.instance.port}', chevron: false),
-              ],
-            ),
-            const _ApiKeyRow(dense: true),
-            const _ModelsFolderRow(dense: true),
-          ],
-        ),
-      SizedBox(height: wide ? 20 : 18),
-      _SectionLabel('INFERENCE', wide: wide),
-      SizedBox(height: wide ? 9 : 8),
-      if (wide)
-        SettingsCard(
-          children: [
-            const SettingsRow(
-              icon: Symbols.memory,
-              title: 'Context size',
-              subtitle: 'Default --ctx-size for loaded models',
-              trailing: [RowValue('8192')],
-            ),
-            SettingsRow(
-              icon: Symbols.output,
-              title: 'Maximum response length',
-              subtitle: app.responseTokenOverride == null
-                  ? 'Using the active persona default'
-                  : 'Override saved on this device',
-              trailing: [RowValue('${app.maxResponseTokens}')],
-              onTap: () => _showResponseLengthSheet(context),
-            ),
-            AnimatedBuilder(
-              animation: BackendProbeService.instance,
-              builder: (context, _) {
-                final probe = BackendProbeService.instance;
-                return SettingsRow(
-                  icon: Symbols.bolt,
-                  title: 'Inference backend',
-                  subtitle: probe.activeDescription,
-                  trailing: [RowValue(probe.activeLabel)],
-                );
-              },
-            ),
-          ],
-        )
-      else
-        SettingsCard(
-          children: [
-            const SettingsRow(
-              icon: Symbols.memory,
-              title: 'Context size',
-              dense: true,
-              trailing: [RowValue('2048')],
-            ),
-            SettingsRow(
-              icon: Symbols.output,
-              title: 'Maximum response length',
-              subtitle: app.responseTokenOverride == null
-                  ? '${app.selectedPersona} persona default'
-                  : 'Device override',
-              dense: true,
-              trailing: [RowValue('${app.maxResponseTokens}')],
-              onTap: () => _showResponseLengthSheet(context),
-            ),
-          ],
-        ),
-      SizedBox(height: wide ? 20 : 18),
-      _SectionLabel('PERSONAS', wide: wide),
-      SizedBox(height: wide ? 9 : 8),
-      SettingsCard(
-        children: [
-          SettingsRow(
-            icon: Symbols.theater_comedy,
-            title: 'Manage personas',
-            subtitle: '${app.selectedPersona} is selected for Chat',
-            dense: !wide,
-            trailing: const [RowValue('OPEN')],
-            onTap: () => _openPersonas(context, wide),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The two-pane layout needs room for the nav column plus content.
+        if (constraints.maxWidth >= 760) return _twoPane();
+        return _sectionList(context);
+      },
+    );
+  }
+
+  Widget _twoPane() {
+    final visible = _visibleSections;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          width: 248,
+          decoration: const BoxDecoration(
+            border: Border(right: BorderSide(color: AppColors.stroke)),
           ),
-        ],
-      ),
-      SizedBox(height: wide ? 20 : 18),
-      _SectionLabel('ON-DEVICE DATA', wide: wide),
-      SizedBox(height: wide ? 9 : 8),
-      _TranscriptionDataCard(
-        dense: !wide,
-        defaultModelId: app.defaultModelId,
-        defaultVariantId: app.defaultModelVariantId,
-      ),
-      SizedBox(height: wide ? 20 : 18),
-      _SectionLabel('VOICE', wide: wide),
-      SizedBox(height: wide ? 9 : 8),
-      AnimatedBuilder(
-        animation: SpeechService.instance,
-        builder: (context, _) {
-          final speech = SpeechService.instance;
-          return SettingsCard(
+          padding: const EdgeInsets.fromLTRB(14, 22, 14, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              SettingsRow(
-                icon: Symbols.record_voice_over,
-                title: 'Assistant voice',
-                subtitle:
-                    '${speech.selectedEngineLabel} · ${speech.selectedVoiceLabel}',
-                dense: !wide,
-                trailing: const [RowValue('CHANGE')],
-                onTap: () => showVoiceSettings(context),
+              _SettingsSearchField(
+                controller: _search,
+                onChanged: (_) => setState(() {
+                  final matches = _visibleSections;
+                  if (matches.isNotEmpty && !matches.contains(_section)) {
+                    _section = matches.first;
+                  }
+                }),
               ),
-              SettingsRow(
-                icon: Symbols.speed,
-                title: 'Speech tuning',
-                subtitle: 'Rate and pitch are saved on this device',
-                dense: !wide,
-                trailing: [
-                  RowValue(
-                    '${speech.rate.toStringAsFixed(2)}× · ${speech.pitch.toStringAsFixed(2)}',
-                  ),
-                ],
-                onTap: () => showVoiceSettings(context),
+              const SizedBox(height: 18),
+              Padding(
+                padding: const EdgeInsets.only(left: 12, bottom: 8),
+                child: Text(
+                  'Settings',
+                  style: AppText.grotesk(12.5, color: AppColors.textMuted),
+                ),
+              ),
+              Expanded(
+                child: ListView(
+                  children: [
+                    for (final section in visible)
+                      _SectionNavItem(
+                        section: section,
+                        selected: section == _section,
+                        onTap: () => setState(() => _section = section),
+                      ),
+                    if (visible.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Text(
+                          'No settings match “${_search.text}”',
+                          style: AppText.grotesk(
+                            12.5,
+                            color: AppColors.textMuted,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ],
-          );
-        },
-      ),
-      if (!wide) ...[
-        const SizedBox(height: 16),
-        Center(
-          child: Text(
-            'EREBRUS AI 0.1.0 · LLAMA.CPP B4432',
-            style: AppText.mono(9.5, color: AppColors.textFaint),
+          ),
+        ),
+        Expanded(
+          child: Align(
+            alignment: Alignment.topCenter,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 820),
+              child: KeyedSubtree(
+                key: ValueKey(_section),
+                child: _SectionBody(section: _section, wide: true),
+              ),
+            ),
           ),
         ),
       ],
-      const SizedBox(height: 24),
-    ];
+    );
+  }
 
-    if (wide) {
-      return Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 760),
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
-            children: children,
-          ),
-        ),
-      );
-    }
+  Widget _sectionList(BuildContext context) {
+    final app = AppScope.of(context);
+    final visible = _visibleSections;
     return SafeArea(
       bottom: false,
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
-        children: children,
+        padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
+        children: [
+          Text('Settings', style: AppText.screenTitle()),
+          const SizedBox(height: 4),
+          Text(
+            'Control local inference, connections, voice, and device storage.',
+            style: AppText.grotesk(13, color: AppColors.textSecondary),
+          ),
+          const SizedBox(height: 16),
+          if (!app.signedIn) ...[
+            const _GuestPromoCard(),
+            const SizedBox(height: 16),
+          ],
+          _SettingsSearchField(
+            controller: _search,
+            onChanged: (_) => setState(() {}),
+          ),
+          const SizedBox(height: 12),
+          Container(
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              border: Border.all(color: AppColors.stroke),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              children: [
+                for (var i = 0; i < visible.length; i++) ...[
+                  if (i > 0)
+                    const Divider(
+                      height: 1,
+                      thickness: 1,
+                      color: AppColors.strokeSoft,
+                    ),
+                  _SectionTile(
+                    section: visible[i],
+                    onTap: () => openSettingsSection(context, visible[i]),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (visible.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                'No settings match “${_search.text}”',
+                textAlign: TextAlign.center,
+                style: AppText.grotesk(13, color: AppColors.textMuted),
+              ),
+            ),
+          const SizedBox(height: 16),
+          const Center(child: _VersionLabel()),
+        ],
       ),
+    );
+  }
+}
+
+/// Opens one section as its own page (phones and narrow windows).
+void openSettingsSection(BuildContext context, SettingsSection section) {
+  Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (context) => Scaffold(
+        backgroundColor: AppColors.bg,
+        body: SafeArea(
+          child: _SectionBody(section: section, wide: false, showBack: true),
+        ),
+      ),
+    ),
+  );
+}
+
+class _SettingsSearchField extends StatelessWidget {
+  const _SettingsSearchField({required this.controller, this.onChanged});
+
+  final TextEditingController controller;
+  final ValueChanged<String>? onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = AppText.grotesk(13.5, color: AppColors.textPrimary);
+    OutlineInputBorder border(Color color) => OutlineInputBorder(
+      borderRadius: BorderRadius.circular(22),
+      borderSide: BorderSide(color: color),
+    );
+    return TextField(
+      controller: controller,
+      onChanged: onChanged,
+      style: style,
+      decoration: InputDecoration(
+        isDense: true,
+        hintText: 'Search settings…',
+        hintStyle: style.copyWith(color: AppColors.textMuted),
+        prefixIcon: const Icon(
+          Symbols.search,
+          size: 18,
+          color: AppColors.textMuted,
+        ),
+        prefixIconConstraints: const BoxConstraints(minWidth: 40),
+        filled: true,
+        fillColor: AppColors.surface,
+        contentPadding: const EdgeInsets.symmetric(vertical: 11),
+        border: border(AppColors.stroke),
+        enabledBorder: border(AppColors.stroke),
+        focusedBorder: border(AppColors.accent),
+      ),
+    );
+  }
+}
+
+class _SectionNavItem extends StatelessWidget {
+  const _SectionNavItem({
+    required this.section,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final SettingsSection section;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Material(
+        color: selected ? AppColors.surface3 : Colors.transparent,
+        borderRadius: BorderRadius.circular(18),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(18),
+          hoverColor: AppColors.surface2,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            child: Row(
+              children: [
+                Icon(
+                  section.icon,
+                  size: 19,
+                  color: selected
+                      ? AppColors.textPrimary
+                      : AppColors.textSecondary,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    section.title,
+                    style: AppText.grotesk(
+                      14,
+                      weight: selected ? FontWeight.w600 : FontWeight.w400,
+                      color: selected
+                          ? AppColors.textPrimary
+                          : AppColors.textBody,
+                    ),
+                  ),
+                ),
+                if (section == SettingsSection.connections ||
+                    section == SettingsSection.tools)
+                  const _NavBadge('New'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NavBadge extends StatelessWidget {
+  const _NavBadge(this.label);
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: AppColors.accent.withA(0.14),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        label,
+        style: AppText.grotesk(
+          10.5,
+          weight: FontWeight.w600,
+          color: AppColors.accentHi,
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionTile extends StatelessWidget {
+  const _SectionTile({required this.section, required this.onTap});
+
+  final SettingsSection section;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 14),
+        child: Row(
+          children: [
+            Icon(section.icon, size: 20, color: AppColors.textSecondary),
+            const SizedBox(width: 13),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    section.title,
+                    style: AppText.grotesk(14.5, weight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    section.subtitle,
+                    style: AppText.grotesk(11.5, color: AppColors.textMuted),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(
+              Symbols.chevron_right,
+              size: 18,
+              color: AppColors.textSecondary,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Scrollable body of one section. Connections manages its own sub-pages.
+class _SectionBody extends StatelessWidget {
+  const _SectionBody({
+    required this.section,
+    required this.wide,
+    this.showBack = false,
+  });
+
+  final SettingsSection section;
+  final bool wide;
+  final bool showBack;
+
+  @override
+  Widget build(BuildContext context) {
+    final padding = wide
+        ? const EdgeInsets.fromLTRB(36, 28, 36, 32)
+        : const EdgeInsets.fromLTRB(18, 12, 18, 28);
+    final onBack = showBack ? () => Navigator.of(context).pop() : null;
+    if (section == SettingsSection.connections) {
+      return ConnectionsSettingsPage(padding: padding, onExit: onBack);
+    }
+    final header = SettingsPageHeader(
+      title: section.title,
+      subtitle: section.subtitle,
+      onBack: onBack,
+    );
+    final children = switch (section) {
+      SettingsSection.account => _accountSection(context, wide),
+      SettingsSection.general => _generalSection(context, wide),
+      SettingsSection.server => _serverSection(context),
+      SettingsSection.tools => const [ToolsSettingsContent()],
+      SettingsSection.voice => const [VoiceSettingsContent()],
+      SettingsSection.data => _dataSection(context),
+      SettingsSection.about => _aboutSection(context),
+      SettingsSection.connections => const <Widget>[],
+    };
+    return ListView(padding: padding, children: [header, ...children]);
+  }
+}
+
+// ─── Account ─────────────────────────────────────────────────────────────────
+
+List<Widget> _accountSection(BuildContext context, bool wide) {
+  final app = AppScope.of(context);
+  if (!app.signedIn) {
+    return [
+      const _GuestPromoCard(),
+      const SizedBox(height: 24),
+      const SettingsGroup(
+        title: 'Guest mode',
+        children: [
+          SettingItem(
+            title: 'Everything runs without an account',
+            description:
+                'Chats, downloaded models, personas, connections and transcripts stay on this device.',
+          ),
+        ],
+      ),
+    ];
+  }
+  return [
+    const _AccountCard(),
+    const SizedBox(height: 26),
+    const SettingsGroup(
+      title: 'Organizations',
+      description: 'Private workspaces for sharing models and personas.',
+      children: [_OrganizationsCard()],
+    ),
+    const SettingsGroup(title: 'Referrals', children: [_ReferralCard()]),
+    SettingsGroup(
+      children: [
+        SettingItem(
+          title: 'Sign out',
+          titleColor: AppColors.danger,
+          description: 'Guest chats, models and personas stay on this device',
+          control: PillButton(
+            'Sign out',
+            icon: Symbols.logout,
+            tone: PillTone.danger,
+            onTap: app.signOut,
+          ),
+        ),
+      ],
+    ),
+  ];
+}
+
+// ─── General ─────────────────────────────────────────────────────────────────
+
+List<Widget> _generalSection(BuildContext context, bool wide) {
+  final app = AppScope.of(context);
+  final profile = DeviceInfoService.detect();
+  final contextSize = const InferenceMemoryPolicy()
+      .plan(device: profile, backend: BackendKind.llamaCpp)
+      .contextSize;
+  return [
+    const SettingsGroup(
+      title: 'Model memory',
+      description:
+          'Keep the chat model resident for fast replies, or offload it to free RAM and VRAM.',
+      children: [_LoadedModelItem()],
+    ),
+    SettingsGroup(
+      title: 'Inference',
+      children: [
+        SettingItem(
+          title: 'Context size',
+          description:
+              'Chosen automatically from this device’s memory so models load safely.',
+          control: _ValueText('$contextSize tokens'),
+        ),
+        SettingItem(
+          title: 'Maximum response length',
+          description: app.responseTokenOverride == null
+              ? 'Using the ${app.selectedPersona} persona default'
+              : 'Device override applied to every persona',
+          control: PillButton(
+            '${app.maxResponseTokens} tokens',
+            icon: Symbols.tune,
+            onTap: () => _showResponseLengthSheet(context),
+          ),
+        ),
+        AnimatedBuilder(
+          animation: BackendProbeService.instance,
+          builder: (context, _) {
+            final probe = BackendProbeService.instance;
+            return SettingItem(
+              title: 'Inference backend',
+              description: probe.activeDescription,
+              control: _ValueText(probe.activeLabel),
+            );
+          },
+        ),
+      ],
+    ),
+    SettingsGroup(
+      title: 'Personas',
+      children: [
+        SettingItem(
+          title: 'Manage personas',
+          description:
+              '${app.selectedPersona} is selected for Chat. Personas set the system prompt and sampling.',
+          control: PillButton(
+            'Manage',
+            onTap: () => _openPersonas(context, wide),
+          ),
+        ),
+      ],
+    ),
+  ];
+}
+
+class _ValueText extends StatelessWidget {
+  const _ValueText(this.value);
+
+  final String value;
+
+  @override
+  Widget build(BuildContext context) =>
+      Text(value, style: AppText.mono(12.5, color: AppColors.textTertiary));
+}
+
+/// Shows which local model is resident in memory with load/offload controls.
+class _LoadedModelItem extends StatelessWidget {
+  const _LoadedModelItem();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+    return AnimatedBuilder(
+      animation: InferenceService.instance,
+      builder: (context, _) {
+        final inference = InferenceService.instance;
+        final loadedId = inference.hasLoadedModel
+            ? inference.activeModelId
+            : null;
+        final selectedLocal =
+            !app.isNetworkModelSelected &&
+            app.selectedModelId.isNotEmpty &&
+            app.isSelectedModelReady;
+        final loadedName = loadedId == null
+            ? null
+            : loadedId == app.selectedModelId
+            ? app.selectedModel
+            : loadedId;
+        final busy = inference.isLoading;
+        return SettingItem(
+          title: loadedName ?? 'No model in memory',
+          description: busy
+              ? 'Loading ${app.selectedModel}…'
+              : loadedName != null
+              ? inference.isGenerating
+                    ? 'Generating a response · offload is available when it finishes'
+                    : 'Resident in memory · ready for chat and LAN requests'
+              : selectedLocal
+              ? 'Preload ${app.selectedModel} so the first reply starts instantly'
+              : 'Select a downloaded model in Chat or Models to preload it',
+          control: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (loadedName != null)
+                const StatePill('LOADED', color: AppColors.success)
+              else if (busy)
+                const StatePill('LOADING', color: AppColors.warn, pulse: true),
+              if (loadedName != null)
+                PillButton(
+                  'Offload',
+                  icon: Symbols.eject,
+                  onTap: inference.isGenerating
+                      ? null
+                      : () => _guard(context, inference.unload),
+                )
+              else
+                PillButton(
+                  'Load',
+                  icon: Symbols.memory,
+                  busy: busy,
+                  onTap: selectedLocal
+                      ? () => _guard(
+                          context,
+                          () => inference.load(app.selectedModelId),
+                        )
+                      : null,
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _guard(BuildContext context, Future<void> Function() run) async {
+    try {
+      await run();
+    } on Object catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+    }
+  }
+}
+
+// ─── Local server ────────────────────────────────────────────────────────────
+
+List<Widget> _serverSection(BuildContext context) {
+  final app = AppScope.of(context);
+  final mobile = !kIsWeb && (Platform.isIOS || Platform.isAndroid);
+  return [
+    if (!kIsWeb && Platform.isIOS) ...[
+      const SettingsNote(
+        'On iOS, stay in the app while serving or downloading. The screen stays on automatically.',
+        tone: NoteTone.warn,
+        icon: Symbols.info,
+      ),
+      const SizedBox(height: 18),
+    ],
+    SettingsGroup(
+      title: 'Sharing',
+      children: [
+        SettingItem(
+          title: mobile ? 'Serve while app is open' : 'Serve on local network',
+          description: mobile
+              ? 'Other devices can use this phone’s models'
+              : 'Publish _erebrusai._tcp so other devices find this node',
+          control: EreToggle(value: app.serving, onChanged: app.setServing),
+        ),
+        SettingItem(
+          title: 'Server port',
+          description:
+              'OpenAI-compatible API · /v1/models, /v1/chat/completions, /v1/models/load and /v1/models/unload',
+          control: _ValueText(
+            app.serving
+                ? ':${LocalServerService.instance.port} · running'
+                : ':${LocalServerService.instance.port} · stopped',
+          ),
+        ),
+        const _ApiKeyRow(),
+      ],
+    ),
+    const SettingsGroup(title: 'Storage', children: [_ModelsFolderRow()]),
+  ];
+}
+
+// ─── Data ────────────────────────────────────────────────────────────────────
+
+List<Widget> _dataSection(BuildContext context) {
+  final app = AppScope.of(context);
+  return [
+    SettingsGroup(
+      title: 'Transcriptions',
+      description: 'Stored only on this device.',
+      children: [
+        _TranscriptionDataCard(
+          defaultModelId: app.defaultModelId,
+          defaultVariantId: app.defaultModelVariantId,
+        ),
+      ],
+    ),
+  ];
+}
+
+// ─── About ───────────────────────────────────────────────────────────────────
+
+List<Widget> _aboutSection(BuildContext context) => [
+  SettingsGroup(
+    children: [
+      const SettingItem(
+        title: 'Erebrus AI',
+        description:
+            'Run AI models locally and chat with them from any device on your network.',
+        control: _VersionLabel(),
+      ),
+      AnimatedBuilder(
+        animation: BackendProbeService.instance,
+        builder: (context, _) => SettingItem(
+          title: 'Runtime',
+          description: BackendProbeService.instance.activeDescription,
+          control: _ValueText(BackendProbeService.instance.activeLabel),
+        ),
+      ),
+    ],
+  ),
+];
+
+class _VersionLabel extends StatelessWidget {
+  const _VersionLabel();
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<PackageInfo>(
+      future: PackageInfo.fromPlatform(),
+      builder: (context, snapshot) {
+        final info = snapshot.data;
+        return Text(
+          info == null
+              ? 'EREBRUS AI'
+              : 'EREBRUS AI ${info.version} (${info.buildNumber})',
+          style: AppText.mono(10.5, color: AppColors.textFaint),
+        );
+      },
     );
   }
 }
@@ -292,363 +872,63 @@ void _openPersonas(BuildContext context, bool wide) {
   );
 }
 
-void showVoiceSettings(BuildContext context) {
-  final wide = MediaQuery.sizeOf(context).width >= 900;
-  final content = const _VoiceSettingsContent();
-  if (wide) {
-    showDialog<void>(
-      context: context,
-      barrierColor: Colors.black.withA(0.6),
-      builder: (_) => Dialog(
-        backgroundColor: AppColors.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-          side: const BorderSide(color: AppColors.strokeHi),
-        ),
-        child: SizedBox(width: 480, height: 620, child: content),
-      ),
-    );
-  } else {
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: AppColors.surface,
-      barrierColor: Colors.black.withA(0.6),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
-      ),
-      constraints: BoxConstraints(
-        maxHeight: MediaQuery.sizeOf(context).height * 0.86,
-      ),
-      builder: (_) => content,
-    );
-  }
-}
-
-class _VoiceSettingsContent extends StatelessWidget {
-  const _VoiceSettingsContent();
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: SpeechService.instance,
-      builder: (context, _) {
-        final speech = SpeechService.instance;
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text('VOICE', style: AppText.sectionHeader()),
-                  ),
-                  GestureDetector(
-                    onTap: () => Navigator.of(context).pop(),
-                    child: const Icon(
-                      Symbols.close,
-                      size: 20,
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: AppColors.surface2,
-                  border: Border.all(color: AppColors.stroke),
-                  borderRadius: BorderRadius.circular(13),
-                ),
-                child: Column(
-                  children: [
-                    _VoiceSlider(
-                      label: 'RATE',
-                      value: speech.rate,
-                      min: 0.2,
-                      max: 0.8,
-                      display: '${speech.rate.toStringAsFixed(2)}×',
-                      onChanged: speech.setRate,
-                    ),
-                    const SizedBox(height: 12),
-                    _VoiceSlider(
-                      label: 'PITCH',
-                      value: speech.pitch,
-                      min: 0.5,
-                      max: 1.5,
-                      display: speech.pitch.toStringAsFixed(2),
-                      onChanged: speech.setPitch,
-                    ),
-                    const SizedBox(height: 12),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: AccentChip(
-                        speech.isSpeakingMessage('__voice_preview__')
-                            ? 'STOP PREVIEW'
-                            : 'PREVIEW',
-                        icon: speech.isSpeakingMessage('__voice_preview__')
-                            ? Symbols.stop
-                            : Symbols.play_arrow,
-                        onTap: speech.preview,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 16),
-              if (speech.engines.isNotEmpty) ...[
-                Text('SPEECH ENGINE', style: AppText.sectionHeader()),
-                const SizedBox(height: 6),
-                Text(
-                  'The engine controls voice quality. Install another Android speech engine to make it appear here.',
-                  style: AppText.grotesk(
-                    11.5,
-                    color: AppColors.textMuted,
-                    height: 1.4,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                for (final engine in speech.engines)
-                  _VoiceRow(
-                    title: speech.engineLabel(engine),
-                    subtitle: engine,
-                    selected: speech.selectedEngine == engine,
-                    onTap: () => speech.selectEngine(engine),
-                  ),
-                const SizedBox(height: 14),
-              ],
-              Text('INSTALLED VOICES', style: AppText.sectionHeader()),
-              const SizedBox(height: 6),
-              Text(
-                'This list comes from your device. Download additional accents in Android Text-to-speech or Apple Spoken Content settings, then reopen this panel.',
-                style: AppText.grotesk(
-                  11.5,
-                  color: AppColors.textMuted,
-                  height: 1.4,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Expanded(
-                child: ListView(
-                  children: [
-                    _VoiceRow(
-                      title: 'System default voice',
-                      subtitle: 'Uses the device language and preferred voice',
-                      selected: speech.selectedVoice == null,
-                      onTap: () => speech.selectVoice(null),
-                    ),
-                    if (!speech.isInitialized)
-                      const Padding(
-                        padding: EdgeInsets.all(14),
-                        child: Center(
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                      )
-                    else if (speech.voices.isEmpty)
-                      Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Text(
-                          'No selectable voices were reported by the system speech engine.',
-                          style: AppText.grotesk(
-                            12,
-                            color: AppColors.textMuted,
-                          ),
-                        ),
-                      )
-                    else
-                      for (final voice in speech.voices)
-                        _VoiceRow(
-                          title: voice.name,
-                          subtitle: voice.locale,
-                          selected: speech.selectedVoice?.id == voice.id,
-                          onTap: () => speech.selectVoice(voice),
-                        ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _VoiceSlider extends StatelessWidget {
-  const _VoiceSlider({
-    required this.label,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.display,
-    required this.onChanged,
-  });
-
-  final String label;
-  final double value;
-  final double min;
-  final double max;
-  final String display;
-  final ValueChanged<double> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        SizedBox(width: 48, child: Text(label, style: AppText.mono(9.5))),
-        Expanded(
-          child: Slider(
-            value: value,
-            min: min,
-            max: max,
-            activeColor: AppColors.accent,
-            inactiveColor: AppColors.strokeHi,
-            onChanged: onChanged,
-          ),
-        ),
-        SizedBox(
-          width: 48,
-          child: Text(
-            display,
-            textAlign: TextAlign.right,
-            style: AppText.mono(10.5, color: AppColors.textTertiary),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _VoiceRow extends StatelessWidget {
-  const _VoiceRow({
-    required this.title,
-    required this.subtitle,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String title;
-  final String subtitle;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 3),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: selected ? AppColors.surface3 : null,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              selected
-                  ? Symbols.radio_button_checked
-                  : Symbols.radio_button_unchecked,
-              size: 18,
-              color: selected ? AppColors.accentHi : AppColors.textMuted,
-            ),
-            const SizedBox(width: 11),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: AppText.grotesk(13, weight: FontWeight.w500),
-                  ),
-                  if (subtitle.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      style: AppText.mono(9.5, color: AppColors.textMuted),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SectionLabel extends StatelessWidget {
-  const _SectionLabel(this.label, {required this.wide});
-
-  final String label;
-  final bool wide;
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(label, style: AppText.sectionHeader(size: wide ? 11 : 10.5));
-  }
-}
-
 class _TranscriptionDataCard extends StatelessWidget {
   const _TranscriptionDataCard({
-    required this.dense,
     required this.defaultModelId,
     required this.defaultVariantId,
   });
 
-  final bool dense;
   final String defaultModelId;
   final String defaultVariantId;
 
   @override
   Widget build(BuildContext context) {
     final service = TranscriptionService.instance;
-    return SettingsCard(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         FutureBuilder<int>(
           future: service.storageBytes(),
-          builder: (context, snapshot) => SettingsRow(
-            icon: Symbols.audio_file,
+          builder: (context, snapshot) => SettingItem(
             title: 'Transcriptions and session audio',
-            subtitle:
+            description:
                 '${service.sessions.length} sessions · ${_formatBytes(snapshot.data ?? 0)} · stored only on this device',
-            dense: dense,
           ),
         ),
-        SettingsRow(
-          icon: Symbols.folder_copy,
+        SettingItem(
           title: 'Export transcription data',
-          subtitle:
+          description:
               'Copies transcripts, metadata, and session audio to a folder you choose',
-          dense: dense,
-          trailing: const [RowValue('EXPORT')],
-          onTap: () => _exportTranscriptions(context, service),
+          control: PillButton(
+            'Export',
+            icon: Symbols.folder_copy,
+            onTap: () => _exportTranscriptions(context, service),
+          ),
         ),
-        SettingsRow(
-          icon: Symbols.delete_forever,
-          iconColor: AppColors.danger,
+        SettingItem(
+          title: 'On-device diagnostics',
+          description:
+              'Backend, model, ASR, RAM, and storage status—never transcript text or paths',
+          control: PillButton(
+            'View',
+            icon: Symbols.monitor_heart,
+            onTap: () => _showDiagnostics(
+              context,
+              defaultModelId: defaultModelId,
+              defaultVariantId: defaultVariantId,
+            ),
+          ),
+        ),
+        SettingItem(
           title: 'Delete all transcription data',
           titleColor: AppColors.danger,
-          subtitle:
+          description:
               'Permanently removes transcripts, indexes, and session audio',
-          dense: dense,
-          onTap: () => _deleteTranscriptions(context, service),
-        ),
-        SettingsRow(
-          icon: Symbols.monitor_heart,
-          title: 'On-device diagnostics',
-          subtitle:
-              'Backend, model, ASR, RAM, and storage status—never transcript text or paths',
-          dense: dense,
-          trailing: const [RowValue('VIEW')],
-          onTap: () => _showDiagnostics(
-            context,
-            defaultModelId: defaultModelId,
-            defaultVariantId: defaultVariantId,
+          control: PillButton(
+            'Delete',
+            icon: Symbols.delete_forever,
+            tone: PillTone.danger,
+            onTap: () => _deleteTranscriptions(context, service),
           ),
         ),
       ],
@@ -1481,21 +1761,23 @@ Future<void> _showInviteSheet(BuildContext context) async {
 }
 
 String _initials(String name) {
-  if (name.isEmpty) return '??';
-  if (name.contains('.')) {
-    return name.split('.').first.substring(0, 1).toUpperCase();
-  }
-  final parts = name.split(' ').where((s) => s.isNotEmpty).toList();
+  // Emails use the local part; names use the first two words. Guards against
+  // empty segments such as ".alex@…" or double spaces.
+  final base = name.contains('@') ? name.split('@').first : name;
+  final parts = base
+      .split(RegExp(r'[\s._-]+'))
+      .where((part) => part.isNotEmpty)
+      .toList();
+  if (parts.isEmpty) return '??';
   if (parts.length >= 2) {
-    return '${parts.first[0]}${parts[1][0]}'.toUpperCase();
+    return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
   }
-  return name.substring(0, name.length >= 2 ? 2 : 1).toUpperCase();
+  final word = parts.first;
+  return word.substring(0, word.length >= 2 ? 2 : 1).toUpperCase();
 }
 
 class _ApiKeyRow extends StatelessWidget {
-  const _ApiKeyRow({required this.dense});
-
-  final bool dense;
+  const _ApiKeyRow();
 
   @override
   Widget build(BuildContext context) {
@@ -1507,37 +1789,37 @@ class _ApiKeyRow extends StatelessWidget {
         final masked = key == null
             ? 'Generating secure key…'
             : '${key.substring(0, 7)}••••••${key.substring(key.length - 4)}';
-        return SettingsRow(
-          icon: Symbols.key,
+        return SettingItem(
           title: 'API key',
-          subtitle: masked,
-          subtitleMono: true,
-          dense: dense,
-          trailing: [
-            if (key != null)
-              _CopySquare(
-                onTap: () async {
-                  await Clipboard.setData(ClipboardData(text: key));
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('API key copied')),
-                    );
-                  }
-                },
+          description:
+              'Send as “Authorization: Bearer …”. Pair a phone by QR code.',
+          control: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                masked,
+                style: AppText.mono(12, color: AppColors.textTertiary),
               ),
-            AccentChip(
-              'PAIR',
-              icon: Symbols.qr_code_2,
-              radius: 9,
-              fontSize: dense ? 10 : 11,
-              iconSize: dense ? 14 : 16,
-              padding: EdgeInsets.symmetric(
-                horizontal: dense ? 10 : 12,
-                vertical: dense ? 7 : 8,
+              if (key != null)
+                _CopySquare(
+                  onTap: () async {
+                    await Clipboard.setData(ClipboardData(text: key));
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('API key copied')),
+                      );
+                    }
+                  },
+                ),
+              PillButton(
+                'Pair',
+                icon: Symbols.qr_code_2,
+                onTap: () => showPairSheet(context),
               ),
-              onTap: () => showPairSheet(context),
-            ),
-          ],
+            ],
+          ),
         );
       },
     );
@@ -1545,9 +1827,7 @@ class _ApiKeyRow extends StatelessWidget {
 }
 
 class _ModelsFolderRow extends StatelessWidget {
-  const _ModelsFolderRow({required this.dense});
-
-  final bool dense;
+  const _ModelsFolderRow();
 
   bool get _isSupported => StorageService.supportsCustomModelsDirectory;
 
@@ -1555,30 +1835,29 @@ class _ModelsFolderRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
     final custom = app.usesCustomModelsDirectory;
-    return SettingsRow(
-      icon: Symbols.folder,
+    return SettingItem(
       title: 'Models folder',
-      subtitle: app.modelsDirectoryDisplayLabel,
-      subtitleMaxLines: 1,
-      dense: dense,
-      trailing: [
-        if (_isSupported && custom)
-          AccentChip(
-            'RESET',
-            radius: 8,
-            fontSize: dense ? 9 : 10,
-            padding: EdgeInsets.symmetric(
-              horizontal: dense ? 8 : 10,
-              vertical: dense ? 6 : 7,
+      description: app.modelsDirectoryDisplayLabel,
+      control: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          if (_isSupported && custom)
+            PillButton(
+              'Reset',
+              tone: PillTone.subtle,
+              onTap: () => _resetModelsFolder(context, app),
             ),
-            onTap: () => _resetModelsFolder(context, app),
-          ),
-        RowValue(
-          _isSupported ? (custom ? 'CHANGE' : 'CHOOSE') : 'DEFAULT',
-          chevron: false,
-        ),
-      ],
-      onTap: _isSupported ? () => _pickModelsFolder(context, app) : null,
+          if (_isSupported)
+            PillButton(
+              custom ? 'Change' : 'Choose',
+              icon: Symbols.folder_open,
+              onTap: () => _pickModelsFolder(context, app),
+            )
+          else
+            const _ValueText('Default'),
+        ],
+      ),
     );
   }
 

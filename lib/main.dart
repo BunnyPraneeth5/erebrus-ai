@@ -18,6 +18,9 @@ import 'services/model_package_service.dart';
 import 'services/node_discovery_service.dart';
 import 'services/storage_service.dart';
 import 'services/transcription_session_repository.dart';
+import 'services/tools/web_tools.dart';
+import 'services/voice_preferences.dart';
+import 'services/connection_service.dart';
 import 'services/persona_service.dart';
 import 'services/power_service.dart';
 
@@ -38,6 +41,9 @@ Future<void> main() async {
   await ModelPackageService.instance.loadIndex();
   await ImportedModelService.instance.load();
   await TranscriptionSessionRepository.instance.load();
+  await VoicePreferences.instance.load();
+  await ConnectionService.instance.load();
+  await WebTools.instance.load();
 
   final auth = WalletAuthController();
   final orgState = OrgState(auth: auth);

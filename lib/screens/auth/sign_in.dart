@@ -48,10 +48,20 @@ class _SignInPageState extends State<SignInPage> {
     super.dispose();
   }
 
+  bool _closing = false;
+
   void _onAuthChanged() {
-    if (_auth?.isAuthenticated == true && mounted) {
-      Navigator.of(context).popUntil((route) => route.isFirst);
-    }
+    if (_closing || _auth?.isAuthenticated != true || !mounted) return;
+    // Sign-in notifies many times (session, entitlement, profile, …). Close
+    // exactly once, after the current frame, and only while this page is
+    // still on the stack — popping again would remove the home route.
+    _closing = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final route = ModalRoute.of(context);
+      if (route == null || !route.isActive) return;
+      Navigator.of(context).popUntil((candidate) => candidate.isFirst);
+    });
   }
 
   @override
@@ -592,7 +602,7 @@ class _EmailLoginSheetState extends State<_EmailLoginSheet> {
     );
     if (!mounted) return;
     setState(() => _busy = false);
-    if (widget.auth.isAuthenticated) Navigator.of(context).pop();
+    // On success the sign-in page closes itself and this sheet with it.
   }
 }
 

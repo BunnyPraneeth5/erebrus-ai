@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'storage_service.dart';
 import 'power_service.dart';
@@ -17,19 +18,70 @@ class WhisperModelSpec {
     required this.sizeBytes,
     required this.sha256,
     required this.minimumRamGB,
+    this.displayName = 'Whisper Tiny',
+    this.summary = 'Fastest · multilingual',
+    this.englishOnly = false,
   });
 
   final String id;
+  final String displayName;
+  final String summary;
+  final bool englishOnly;
   final String filename;
   final String downloadUrl;
   final String revision;
   final int sizeBytes;
   final String sha256;
   final double minimumRamGB;
+
+  String get sizeLabel {
+    final mb = sizeBytes / (1024 * 1024);
+    return mb >= 1024
+        ? '${(mb / 1024).toStringAsFixed(1)} GB'
+        : '${mb.round()} MB';
+  }
 }
 
+const _whisperRevision = '5359861c739e955e79d9a303bcbc70fb988958b1';
+const _whisperBaseUrl =
+    'https://huggingface.co/ggerganov/whisper.cpp/resolve/$_whisperRevision';
+
 class WhisperModelManager extends ChangeNotifier {
-  static final WhisperModelManager instance = WhisperModelManager();
+  /// Every verified speech-recognition model the app can install. Sizes and
+  /// SHA-256 digests are the Hugging Face LFS metadata at [_whisperRevision].
+  static const specs = [tiny, base, baseEnglish, small, largeV3TurboQ5];
+
+  static final Map<String, WhisperModelManager> _managers = {};
+  static final ValueNotifier<String> selectedSpecId = ValueNotifier(tiny.id);
+  static const _selectionKey = 'whisper_model_id';
+
+  /// The manager for the speech model the user selected in Voice settings.
+  static WhisperModelManager get instance => forSpec(selectedSpec);
+
+  static WhisperModelSpec get selectedSpec => specById(selectedSpecId.value);
+
+  static WhisperModelSpec specById(String id) =>
+      specs.where((spec) => spec.id == id).firstOrNull ?? tiny;
+
+  static WhisperModelManager forSpec(WhisperModelSpec spec) =>
+      _managers.putIfAbsent(spec.id, () => WhisperModelManager(spec: spec));
+
+  static Future<void> loadSelection() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      selectedSpecId.value = specById(
+        preferences.getString(_selectionKey) ?? tiny.id,
+      ).id;
+    } on Object catch (error) {
+      debugPrint('[Whisper] selection load failed: $error');
+    }
+  }
+
+  static Future<void> select(String id) async {
+    selectedSpecId.value = specById(id).id;
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(_selectionKey, selectedSpecId.value);
+  }
 
   WhisperModelManager({
     Future<Directory> Function()? directoryProvider,
@@ -42,12 +94,60 @@ class WhisperModelManager extends ChangeNotifier {
   static const tiny = WhisperModelSpec(
     id: 'whisper-tiny-multilingual',
     filename: 'ggml-tiny.bin',
-    downloadUrl:
-        'https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin',
-    revision: '5359861c739e955e79d9a303bcbc70fb988958b1',
+    downloadUrl: '$_whisperBaseUrl/ggml-tiny.bin',
+    revision: _whisperRevision,
     sizeBytes: 77691713,
     sha256: 'be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21',
     minimumRamGB: 0.5,
+  );
+
+  static const base = WhisperModelSpec(
+    id: 'whisper-base-multilingual',
+    filename: 'ggml-base.bin',
+    downloadUrl: '$_whisperBaseUrl/ggml-base.bin',
+    revision: _whisperRevision,
+    sizeBytes: 147951465,
+    sha256: '60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe',
+    minimumRamGB: 1,
+    displayName: 'Whisper Base',
+    summary: 'Balanced · multilingual',
+  );
+
+  static const baseEnglish = WhisperModelSpec(
+    id: 'whisper-base-en',
+    filename: 'ggml-base.en.bin',
+    downloadUrl: '$_whisperBaseUrl/ggml-base.en.bin',
+    revision: _whisperRevision,
+    sizeBytes: 147964211,
+    sha256: 'a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002',
+    minimumRamGB: 1,
+    displayName: 'Whisper Base (English)',
+    summary: 'Balanced · English only',
+    englishOnly: true,
+  );
+
+  static const small = WhisperModelSpec(
+    id: 'whisper-small-multilingual',
+    filename: 'ggml-small.bin',
+    downloadUrl: '$_whisperBaseUrl/ggml-small.bin',
+    revision: _whisperRevision,
+    sizeBytes: 487601967,
+    sha256: '1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b',
+    minimumRamGB: 2,
+    displayName: 'Whisper Small',
+    summary: 'More accurate · multilingual',
+  );
+
+  static const largeV3TurboQ5 = WhisperModelSpec(
+    id: 'whisper-large-v3-turbo-q5',
+    filename: 'ggml-large-v3-turbo-q5_0.bin',
+    downloadUrl: '$_whisperBaseUrl/ggml-large-v3-turbo-q5_0.bin',
+    revision: _whisperRevision,
+    sizeBytes: 574041195,
+    sha256: '394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2',
+    minimumRamGB: 3,
+    displayName: 'Whisper Large v3 Turbo',
+    summary: 'Most accurate · Q5 quantized · multilingual',
   );
 
   final Future<Directory> Function() _directoryProvider;
@@ -118,7 +218,7 @@ class WhisperModelManager extends ChangeNotifier {
     _failure = '';
     _cancelRequested = false;
     notifyListeners();
-    await PowerService.instance.startDownload('Whisper Tiny');
+    await PowerService.instance.startDownload(spec.displayName);
 
     final staging = File('${destination.path}.part');
     final previous = File('${destination.path}.previous');
@@ -205,6 +305,25 @@ class WhisperModelManager extends ChangeNotifier {
       await PowerService.instance.stopDownload();
       notifyListeners();
     }
+  }
+
+  /// Removes this model and its rollback slot from disk.
+  Future<void> delete() async {
+    if (_downloading) cancelDownload();
+    final directory = await _directoryProvider();
+    for (final name in [
+      spec.filename,
+      '${spec.filename}.previous',
+      '${spec.filename}.part',
+      '${spec.filename}.slots.json',
+    ]) {
+      final file = File(p.join(directory.path, name));
+      if (await file.exists()) await file.delete();
+    }
+    _verification = null;
+    _activeRevision = null;
+    _canRollback = false;
+    notifyListeners();
   }
 
   void cancelDownload() {

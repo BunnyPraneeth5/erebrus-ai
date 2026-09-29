@@ -34,6 +34,9 @@ class OrgState extends ChangeNotifier {
 
   void _onAuthChanged() {
     if (!_auth.isAuthenticated) {
+      // The cache holds the previous account's workspaces; drop it so the
+      // next account never sees them, even briefly.
+      if (_loadedForToken != null) unawaited(_deleteCache());
       _loadedForToken = null;
       orgs = [];
       selectedOrg = null;
@@ -150,6 +153,8 @@ class OrgState extends ChangeNotifier {
       if (!await file.exists()) return;
       final text = await file.readAsString();
       final j = jsonDecode(text) as Map<String, dynamic>;
+      final cachedUser = j['user_id']?.toString() ?? '';
+      if (cachedUser.isEmpty || cachedUser != _auth.userId) return;
       final orgList = j['orgs'];
       if (orgList is List) {
         orgs = orgList
@@ -189,6 +194,7 @@ class OrgState extends ChangeNotifier {
       final dir = await StorageService.instance.baseDir();
       final file = File('${dir.path}/org_state.json');
       final payload = {
+        'user_id': _auth.userId,
         'orgs': orgs.map((o) => o.toJson()).toList(),
         'selected_org_id': selectedOrg?.id,
         'org_models': orgModels.map((m) => m.toJson()).toList(),
@@ -196,6 +202,17 @@ class OrgState extends ChangeNotifier {
       await file.writeAsString(jsonEncode(payload));
     } catch (e) {
       debugPrint('[OrgState] cache persist failed: $e');
+    }
+  }
+
+  Future<void> _deleteCache() async {
+    if (kIsWeb) return;
+    try {
+      final dir = await StorageService.instance.baseDir();
+      final file = File('${dir.path}/org_state.json');
+      if (await file.exists()) await file.delete();
+    } catch (e) {
+      debugPrint('[OrgState] cache delete failed: $e');
     }
   }
 

@@ -4,16 +4,24 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../data/tool_activity.dart';
 import '../../services/chat_service.dart';
+import '../../services/connection_service.dart';
 import '../../services/inference_service.dart';
 import '../../services/network_inference_service.dart';
 import '../../services/speech_service.dart';
+import '../../services/tools/agent_tools.dart';
+import '../../services/tools/web_tools.dart';
+import '../../services/voice_preferences.dart';
 import '../../state/app_state.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_text.dart';
 import '../../widgets/ere_controls.dart';
+import '../../widgets/markdown_view.dart';
 import '../../widgets/spark_logo.dart';
+import '../settings/settings_screen.dart';
 import 'pickers.dart';
 
 class ChatScreen extends StatelessWidget {
@@ -351,41 +359,8 @@ class _DesktopHeader extends StatelessWidget {
             ),
           ),
           const Spacer(),
-          AnimatedBuilder(
-            animation: Listenable.merge([
-              InferenceService.instance,
-              NetworkInferenceService.instance,
-            ]),
-            builder: (context, _) {
-              final inference = InferenceService.instance;
-              final network = NetworkInferenceService.instance;
-              final generating = inference.isGenerating || network.isGenerating;
-              final rate = inference.isGenerating
-                  ? inference.currentTokensPerSecond
-                  : inference.lastTokensPerSecond;
-              return Row(
-                children: [
-                  const SizedBox(width: 10),
-                  GlowDot(glow: generating),
-                  const SizedBox(width: 7),
-                  Text(
-                    generating ? 'GENERATING' : 'READY',
-                    style: AppText.mono(
-                      11,
-                      weight: FontWeight.w500,
-                      color: generating ? AppColors.accent : AppColors.success,
-                      lsEm: 0.06,
-                    ),
-                  ),
-                  if (rate != null)
-                    Text(
-                      ' · ${_formatTokenRate(rate)} TOK/S',
-                      style: AppText.mono(11, color: AppColors.textMuted),
-                    ),
-                ],
-              );
-            },
-          ),
+          const SizedBox(width: 10),
+          const _ModelStateControl(compact: false),
         ],
       ),
     );
@@ -599,7 +574,9 @@ class _MobileHeader extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 8),
+          const _ModelStateControl(compact: true),
+          const SizedBox(width: 8),
           GestureDetector(
             onTap: () => ChatService.instance.newSession(),
             child: const Icon(
@@ -644,9 +621,11 @@ class _MessageTile extends StatelessWidget {
   }
 
   Future<void> _regenerate(BuildContext context) async {
+    final app = AppScope.of(context);
     await ChatService.instance.regenerate(
       message.id,
-      persona: AppScope.of(context).effectivePersonaConfig,
+      persona: app.effectivePersonaConfig,
+      webTools: app.webSearchActive,
     );
     if (!context.mounted) return;
   }
@@ -698,7 +677,20 @@ class _MessageTile extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _AssistantBody(text: message.text, streaming: message.streaming),
+        if (message.activity.isNotEmpty) ...[
+          _ToolActivityList(activity: message.activity),
+          const SizedBox(height: 10),
+        ],
+        if (message.text.isNotEmpty || message.activity.isEmpty)
+          _AssistantBody(
+            text: message.text,
+            streaming: message.streaming,
+            sources: message.sources,
+          ),
+        if (message.sources.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          _SourceList(sources: message.sources),
+        ],
         const SizedBox(height: 8),
         if (message.streaming)
           Row(
@@ -722,7 +714,10 @@ class _MessageTile extends StatelessWidget {
           )
         else
           AnimatedBuilder(
-            animation: SpeechService.instance,
+            animation: Listenable.merge([
+              SpeechService.instance,
+              VoicePreferences.instance,
+            ]),
             builder: (context, _) => Wrap(
               spacing: 12,
               runSpacing: 6,
@@ -743,16 +738,19 @@ class _MessageTile extends StatelessWidget {
                   label: 'Share',
                   onTap: () => _share(context),
                 ),
-                _MessageAction(
-                  icon: SpeechService.instance.isSpeakingMessage(message.id)
-                      ? Symbols.stop_circle
-                      : Symbols.volume_up,
-                  label: SpeechService.instance.isSpeakingMessage(message.id)
-                      ? 'Stop speaking'
-                      : 'Speak',
-                  active: SpeechService.instance.isSpeakingMessage(message.id),
-                  onTap: () => _speak(context),
-                ),
+                if (VoicePreferences.instance.readAloudEnabled)
+                  _MessageAction(
+                    icon: SpeechService.instance.isSpeakingMessage(message.id)
+                        ? Symbols.stop_circle
+                        : Symbols.volume_up,
+                    label: SpeechService.instance.isSpeakingMessage(message.id)
+                        ? 'Stop speaking'
+                        : 'Speak',
+                    active: SpeechService.instance.isSpeakingMessage(
+                      message.id,
+                    ),
+                    onTap: () => _speak(context),
+                  ),
                 if (message.meta?.isNotEmpty == true ||
                     message.tokensPerSecond != null ||
                     message.truncated)
@@ -812,55 +810,33 @@ String _formatTokenRate(double rate) {
   return rate.toStringAsFixed(rate >= 10 ? 1 : 2);
 }
 
-/// Assistant prose — parses `code` spans and appends the blinking block cursor
-/// while streaming.
+/// Assistant prose rendered as Markdown, with the blinking block cursor
+/// appended while streaming and `[n]` citations opening their source.
 class _AssistantBody extends StatelessWidget {
-  const _AssistantBody({required this.text, required this.streaming});
+  const _AssistantBody({
+    required this.text,
+    required this.streaming,
+    this.sources = const [],
+  });
 
   final String text;
   final bool streaming;
+  final List<SourceRef> sources;
+
+  void _openCitation(int number) {
+    final source = sources.where((item) => item.index == number).firstOrNull;
+    final uri = source == null ? null : Uri.tryParse(source.url);
+    if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final spans = <InlineSpan>[];
-    final parts = text.split('`');
-    for (var i = 0; i < parts.length; i++) {
-      if (parts[i].isEmpty) continue;
-      if (i.isOdd) {
-        spans.add(
-          WidgetSpan(
-            alignment: PlaceholderAlignment.middle,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
-                color: AppColors.accent.withA(0.1),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                parts[i],
-                style: AppText.mono(12.5, color: AppColors.accentHi),
-              ),
-            ),
-          ),
-        );
-      } else {
-        spans.add(TextSpan(text: parts[i]));
-      }
-    }
-    if (streaming) {
-      spans.add(
-        const WidgetSpan(
-          alignment: PlaceholderAlignment.middle,
-          child: Padding(
-            padding: EdgeInsets.only(left: 3),
-            child: _BlinkCursor(),
-          ),
-        ),
-      );
-    }
-    return Text.rich(
-      TextSpan(children: spans),
-      style: AppText.grotesk(14, color: AppColors.textBody, height: 1.6),
+    return SelectionArea(
+      child: MarkdownView(
+        data: text,
+        trailing: streaming ? const _BlinkCursor() : null,
+        onCitationTap: sources.isEmpty ? null : _openCitation,
+      ),
     );
   }
 }
@@ -953,6 +929,19 @@ class _ComposerState extends State<_Composer> {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
     final app = AppScope.of(context);
+    if (app.selectedModelIsLocal && !app.selectedModelLoaded) {
+      // Keep the draft; loading is the user's explicit choice.
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Load ${app.selectedModel} to start chatting'),
+          action: SnackBarAction(
+            label: 'LOAD',
+            onPressed: () => loadSelectedModelWithFeedback(context),
+          ),
+        ),
+      );
+      return;
+    }
     _controller.clear();
     _focusNode.unfocus();
     setState(() => _busy = true);
@@ -961,8 +950,29 @@ class _ComposerState extends State<_Composer> {
       modelId: app.selectedModelId,
       networkNodeId: app.selectedNetworkNodeId,
       persona: app.effectivePersonaConfig,
+      webTools: app.webSearchActive,
     );
     if (mounted) setState(() => _busy = false);
+  }
+
+  void _toggleWebSearch(AppState app) {
+    if (!WebTools.instance.isReady) {
+      openSettingsSection(context, SettingsSection.tools);
+      return;
+    }
+    if (!app.selectedModelSupportsTools && !app.webSearchInChat) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Web search works with Connection models for now (llama.cpp, '
+            'Ollama, LM Studio, vLLM, OpenAI, Anthropic, OpenRouter). Pick one '
+            'from the model menu.',
+          ),
+        ),
+      );
+      return;
+    }
+    app.setWebSearchInChat(!app.webSearchInChat);
   }
 
   @override
@@ -1011,7 +1021,13 @@ class _ComposerState extends State<_Composer> {
                         onSubmitted: (_) => _send(),
                       ),
                     ),
-                    const SizedBox(width: 10),
+                    const SizedBox(width: 6),
+                    _WebSearchToggle(
+                      active: app.webSearchActive,
+                      armed: app.webSearchInChat,
+                      onTap: () => _toggleWebSearch(app),
+                    ),
+                    const SizedBox(width: 6),
                     GestureDetector(
                       onTap: _busy ? null : _send,
                       child: Container(
@@ -1043,71 +1059,487 @@ class _ComposerState extends State<_Composer> {
               if (widget.wide)
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Expanded(
-                        child: Row(
-                          children: [
-                            Icon(
-                              app.isNetworkModelSelected
-                                  ? Symbols.wifi
-                                  : Symbols.lock,
-                              size: 13,
-                              color: AppColors.success,
-                            ),
-                            const SizedBox(width: 6),
-                            Flexible(
-                              child: Text(
-                                app.isNetworkModelSelected
-                                    ? 'LOCAL NETWORK · SENT TO ${app.selectedNetworkModelTarget?.nodeName.toUpperCase() ?? 'SELECTED NODE'}'
-                                    : 'LOCAL · NOTHING LEAVES THIS DEVICE',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: AppText.mono(
-                                  10,
-                                  color: AppColors.textMuted,
-                                  lsEm: 0.08,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Text(
-                        'CONTEXT 3.2K / 8K',
-                        style: AppText.mono(10, color: AppColors.textMuted),
-                      ),
-                    ],
-                  ),
+                  child: _ComposerPrivacyLine(app: app, centered: false),
                 )
               else
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      app.isNetworkModelSelected ? Symbols.wifi : Symbols.lock,
-                      size: 12,
-                      color: AppColors.success,
-                    ),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(
-                        app.isNetworkModelSelected
-                            ? 'LOCAL NETWORK · ${app.selectedNetworkModelTarget?.nodeName.toUpperCase() ?? 'SELECTED NODE'}'
-                            : 'ON-DEVICE · NOTHING LEAVES YOUR PHONE',
-                        textAlign: TextAlign.center,
-                        style: AppText.mono(
-                          9.5,
-                          color: AppColors.textFaint,
-                          lsEm: 0.08,
+                _ComposerPrivacyLine(app: app, centered: true),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Where the next message goes: this device, a LAN node, a model server, or
+/// a cloud API — plus the search provider when web search is on.
+class _ComposerPrivacyLine extends StatelessWidget {
+  const _ComposerPrivacyLine({required this.app, required this.centered});
+
+  final AppState app;
+  final bool centered;
+
+  @override
+  Widget build(BuildContext context) {
+    final target = app.selectedNetworkModelTarget;
+    final connection = ConnectionService.instance.byNodeId(
+      app.selectedNetworkNodeId,
+    );
+    final cloud = connection != null && !connection.provider.isLocal;
+    final (icon, label) = !app.isNetworkModelSelected
+        ? (
+            Symbols.lock,
+            centered
+                ? 'ON-DEVICE · NOTHING LEAVES YOUR DEVICE'
+                : 'LOCAL · NOTHING LEAVES THIS DEVICE',
+          )
+        : cloud
+        ? (
+            Symbols.cloud,
+            'CLOUD · SENT TO ${connection.provider.label.toUpperCase()}',
+          )
+        : (
+            Symbols.wifi,
+            'NETWORK · SENT TO ${target?.nodeName.toUpperCase() ?? 'SELECTED NODE'}',
+          );
+    final web = app.webSearchActive;
+    final color = cloud || web ? AppColors.warn : AppColors.success;
+    final text = web
+        ? '$label · WEB SEARCH VIA ${WebTools.instance.provider.label.toUpperCase()}'
+        : label;
+    return Row(
+      mainAxisAlignment: centered
+          ? MainAxisAlignment.center
+          : MainAxisAlignment.start,
+      children: [
+        Icon(icon, size: centered ? 12 : 13, color: color),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: centered ? TextAlign.center : TextAlign.start,
+            style: AppText.mono(
+              centered ? 9.5 : 10,
+              color: centered ? AppColors.textFaint : AppColors.textMuted,
+              lsEm: 0.08,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Globe button in the composer. [armed] is the user's switch; [active]
+/// means web search will really run (configured + tool-capable model).
+class _WebSearchToggle extends StatelessWidget {
+  const _WebSearchToggle({
+    required this.active,
+    required this.armed,
+    required this.onTap,
+  });
+
+  final bool active;
+  final bool armed;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final tooltip = active
+        ? 'Web search on for this chat'
+        : armed
+        ? 'Web search is on but unavailable for this model'
+        : WebTools.instance.isReady
+        ? 'Search the web'
+        : 'Set up web search';
+    return Tooltip(
+      message: tooltip,
+      child: Semantics(
+        button: true,
+        toggled: armed,
+        label: 'Web search',
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(11),
+          child: Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: active ? AppColors.accent.withA(0.14) : null,
+              border: Border.all(
+                color: active
+                    ? AppColors.accent.withA(0.45)
+                    : Colors.transparent,
+              ),
+              borderRadius: BorderRadius.circular(11),
+            ),
+            child: Icon(
+              Symbols.language,
+              size: 19,
+              color: active
+                  ? AppColors.accentHi
+                  : armed
+                  ? AppColors.warn
+                  : AppColors.textMuted,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The tool steps behind an answer: "Searched the web for …" etc.
+class _ToolActivityList extends StatelessWidget {
+  const _ToolActivityList({required this.activity});
+
+  final List<ToolActivity> activity;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final step in activity)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 16,
+                  height: 18,
+                  child: Center(
+                    child: switch (step.status) {
+                      ToolActivityStatus.running => const SizedBox(
+                        width: 11,
+                        height: 11,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.6,
+                          color: AppColors.accent,
                         ),
+                      ),
+                      ToolActivityStatus.done => Icon(
+                        step.name == 'fetch_url'
+                            ? Symbols.article
+                            : Symbols.travel_explore,
+                        size: 14,
+                        color: AppColors.textMuted,
+                      ),
+                      ToolActivityStatus.failed => const Icon(
+                        Symbols.error,
+                        size: 14,
+                        color: AppColors.danger,
+                      ),
+                    },
+                  ),
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text.rich(
+                    TextSpan(
+                      text: step.label,
+                      children: [
+                        if (step.summary.isNotEmpty)
+                          TextSpan(
+                            text: '  ·  ${step.summary}',
+                            style: AppText.grotesk(
+                              12,
+                              color: step.status == ToolActivityStatus.failed
+                                  ? AppColors.danger
+                                  : AppColors.textFaint,
+                            ),
+                          ),
+                      ],
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppText.grotesk(12.5, color: AppColors.textMuted),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Numbered sources matching the answer's [n] citations; tap to open.
+class _SourceList extends StatelessWidget {
+  const _SourceList({required this.sources});
+
+  final List<SourceRef> sources;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [for (final source in sources) _SourceChip(source: source)],
+    );
+  }
+}
+
+class _SourceChip extends StatelessWidget {
+  const _SourceChip({required this.source});
+
+  final SourceRef source;
+
+  @override
+  Widget build(BuildContext context) {
+    final uri = Uri.tryParse(source.url);
+    final host = (uri?.host ?? source.url).replaceFirst(RegExp(r'^www\.'), '');
+    return Tooltip(
+      message: source.title.isEmpty
+          ? source.url
+          : '${source.title}\n${source.url}',
+      child: InkWell(
+        onTap: uri == null
+            ? null
+            : () => launchUrl(uri, mode: LaunchMode.externalApplication),
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 220),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+          decoration: BoxDecoration(
+            color: AppColors.surface2,
+            border: Border.all(color: AppColors.stroke),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${source.index}',
+                style: AppText.mono(
+                  10.5,
+                  weight: FontWeight.w600,
+                  color: AppColors.accentHi,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  host,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppText.grotesk(12, color: AppColors.textSecondary),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Loads the selected on-device model, reporting failures in a snackbar.
+Future<void> loadSelectedModelWithFeedback(BuildContext context) async {
+  final app = AppScope.of(context);
+  final messenger = ScaffoldMessenger.of(context);
+  final error = await app.loadSelectedModel();
+  if (error != null) {
+    messenger.showSnackBar(SnackBar(content: Text('Could not load: $error')));
+  }
+}
+
+/// Memory state of the selected model with Load / Eject for on-device
+/// models. Network models are always ready, so they only show activity.
+class _ModelStateControl extends StatelessWidget {
+  const _ModelStateControl({required this.compact});
+
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        InferenceService.instance,
+        NetworkInferenceService.instance,
+      ]),
+      builder: (context, _) {
+        final inference = InferenceService.instance;
+        final network = NetworkInferenceService.instance;
+        final local = app.selectedModelIsLocal;
+        final loaded = app.selectedModelLoaded;
+        final generating = inference.isGenerating || network.isGenerating;
+        final loading =
+            inference.isLoading &&
+            inference.activeModelId == app.selectedModelId;
+
+        if (!local) {
+          if (compact) return const SizedBox.shrink();
+          return _StateLabel(
+            color: generating ? AppColors.accent : AppColors.success,
+            label: generating ? 'GENERATING' : 'READY',
+            glow: generating,
+          );
+        }
+
+        final rate = inference.isGenerating
+            ? inference.currentTokensPerSecond
+            : inference.lastTokensPerSecond;
+        final (Color color, String label) = loading
+            ? (AppColors.warn, 'LOADING')
+            : generating
+            ? (AppColors.accent, 'GENERATING')
+            : loaded
+            ? (AppColors.success, 'LOADED')
+            : (AppColors.textMuted, 'NOT LOADED');
+        final otherLoaded =
+            !loaded &&
+            inference.hasLoadedModel &&
+            inference.activeModelId != null;
+
+        final Widget action;
+        if (loading) {
+          action = const SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: AppColors.warn,
+            ),
+          );
+        } else if (loaded) {
+          action = _HeaderAction(
+            icon: Symbols.eject,
+            label: compact ? null : 'Eject',
+            tooltip: generating
+                ? 'Wait for the response to finish to eject'
+                : 'Eject ${app.selectedModel} and free its memory',
+            onTap: generating ? null : app.ejectModel,
+          );
+        } else {
+          action = _HeaderAction(
+            icon: Symbols.memory,
+            label: compact ? null : 'Load',
+            primary: true,
+            tooltip: otherLoaded
+                ? 'Load ${app.selectedModel} (replaces the model in memory)'
+                : 'Load ${app.selectedModel} into memory',
+            onTap: () => loadSelectedModelWithFeedback(context),
+          );
+        }
+
+        if (compact) return action;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _StateLabel(color: color, label: label, glow: generating),
+            if (loaded && rate != null)
+              Text(
+                ' · ${_formatTokenRate(rate)} TOK/S',
+                style: AppText.mono(11, color: AppColors.textMuted),
+              ),
+            const SizedBox(width: 10),
+            action,
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _StateLabel extends StatelessWidget {
+  const _StateLabel({
+    required this.color,
+    required this.label,
+    this.glow = false,
+  });
+
+  final Color color;
+  final String label;
+  final bool glow;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      GlowDot(color: color, glow: glow),
+      const SizedBox(width: 7),
+      Text(
+        label,
+        style: AppText.mono(
+          11,
+          weight: FontWeight.w500,
+          color: color,
+          lsEm: 0.06,
+        ),
+      ),
+    ],
+  );
+}
+
+class _HeaderAction extends StatelessWidget {
+  const _HeaderAction({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+    this.label,
+    this.primary = false,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onTap;
+  final String? label;
+  final bool primary;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    final fg = primary ? AppColors.accentHi : AppColors.textPrimary;
+    return Tooltip(
+      message: tooltip,
+      child: Semantics(
+        button: true,
+        enabled: enabled,
+        label: label ?? tooltip,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(9),
+          child: Opacity(
+            opacity: enabled ? 1 : 0.45,
+            child: Container(
+              height: 32,
+              padding: EdgeInsets.symmetric(horizontal: label == null ? 7 : 11),
+              decoration: BoxDecoration(
+                color: primary
+                    ? AppColors.accent.withA(0.14)
+                    : AppColors.surface2,
+                border: Border.all(
+                  color: primary
+                      ? AppColors.accent.withA(0.4)
+                      : AppColors.strokeHi,
+                ),
+                borderRadius: BorderRadius.circular(9),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 16, color: fg),
+                  if (label != null) ...[
+                    const SizedBox(width: 6),
+                    Text(
+                      label!,
+                      maxLines: 1,
+                      softWrap: false,
+                      style: AppText.grotesk(
+                        12.5,
+                        weight: FontWeight.w600,
+                        color: fg,
                       ),
                     ),
                   ],
-                ),
-            ],
+                ],
+              ),
+            ),
           ),
         ),
       ),

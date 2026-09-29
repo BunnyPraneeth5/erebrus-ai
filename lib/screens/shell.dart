@@ -2,11 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../state/app_state.dart';
 import '../navigation/shell_tab.dart';
-import '../services/inference_service.dart';
-import '../services/network_inference_service.dart';
 import '../services/transcription_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text.dart';
@@ -51,10 +50,6 @@ const _navItems = [
   _NavItem(ShellTab.settings, 'SETTINGS', Symbols.tune),
 ];
 
-@visibleForTesting
-bool shouldReleaseChatModel({required ShellTab from, required ShellTab to}) =>
-    from == ShellTab.chat && to != ShellTab.chat;
-
 class Shell extends StatefulWidget {
   const Shell({super.key, this.initialTab = ShellTab.chat});
 
@@ -95,10 +90,9 @@ class _ShellState extends State<Shell> {
       await transcription.stopPlayback();
     }
     if (!mounted) return;
+    // On-device models stay loaded until the user ejects them (chat header
+    // or Settings → General); switching tabs never unloads them.
     setState(() => _tab = tab);
-    if (shouldReleaseChatModel(from: previousTab, to: tab)) {
-      unawaited(_releaseChatModel());
-    }
   }
 
   Future<_LeaveTranscriptionAction?> _confirmLeavingTranscription(
@@ -146,20 +140,6 @@ class _ShellState extends State<Shell> {
       ],
     ),
   );
-
-  Future<void> _releaseChatModel() async {
-    final inference = InferenceService.instance;
-    try {
-      if (NetworkInferenceService.instance.isGenerating) {
-        await NetworkInferenceService.instance.cancel();
-      }
-      if (inference.isGenerating) await inference.cancel();
-      await inference.unload();
-      debugPrint('[Inference] chat model unloaded after leaving Chat');
-    } on Object catch (error) {
-      debugPrint('[Inference] chat model unload failed: $error');
-    }
-  }
 
   Widget _body(bool wide) => IndexedStack(
     index: _tab.index,
@@ -366,9 +346,14 @@ class _Sidebar extends StatelessWidget {
           else if (tab == ShellTab.settings)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 6),
-              child: Text(
-                'EREBRUS AI 0.1.0 · LLAMA.CPP B4432',
-                style: AppText.mono(9.5, color: AppColors.textFaint),
+              child: FutureBuilder<PackageInfo>(
+                future: PackageInfo.fromPlatform(),
+                builder: (context, snapshot) => Text(
+                  snapshot.data == null
+                      ? 'EREBRUS AI'
+                      : 'EREBRUS AI ${snapshot.data!.version} (${snapshot.data!.buildNumber})',
+                  style: AppText.mono(9.5, color: AppColors.textFaint),
+                ),
               ),
             )
           else ...[

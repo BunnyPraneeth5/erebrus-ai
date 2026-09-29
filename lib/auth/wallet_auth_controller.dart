@@ -88,7 +88,9 @@ class WalletAuthController extends ChangeNotifier {
   /// Initializes platform detection and restores any persisted session.
   Future<void> initialize() async {
     await detectDevice();
-    await loadPersistedSession();
+    // Startup restores the stored session from disk only; gateway checks run
+    // in the background so a slow or offline network never blocks launch.
+    await loadPersistedSession(awaitNetwork: false);
     unawaited(loadAuthMethods());
   }
 
@@ -101,7 +103,9 @@ class WalletAuthController extends ChangeNotifier {
   }
 
   /// Restores token + profile from secure storage before the UI loads.
-  Future<void> loadPersistedSession() async {
+  /// With [awaitNetwork] false, the gateway revalidation and profile refresh
+  /// continue in the background after the local session is restored.
+  Future<void> loadPersistedSession({bool awaitNetwork = true}) async {
     sessionReady = false;
     authError = null;
     notifyListeners();
@@ -114,12 +118,12 @@ class WalletAuthController extends ChangeNotifier {
         userId = stored.userId;
         role = stored.role;
         authMethod = stored.authMethod;
-        await revalidateSession();
-        await refreshProfile();
-        await refreshAccountOrgInvites();
-        await refreshRank();
-        if (isAuthenticated) {
-          debugPrint('[Auth] restored session for ${stored.walletAddress}');
+        debugPrint('[Auth] restored session for ${stored.walletAddress}');
+        final refresh = _refreshRestoredSession();
+        if (awaitNetwork) {
+          await refresh;
+        } else {
+          unawaited(refresh);
         }
       } else {
         entitlement = EntitlementState.none;
@@ -129,6 +133,17 @@ class WalletAuthController extends ChangeNotifier {
     } finally {
       sessionReady = true;
       notifyListeners();
+    }
+  }
+
+  Future<void> _refreshRestoredSession() async {
+    try {
+      await revalidateSession();
+      await refreshProfile();
+      await refreshAccountOrgInvites();
+      await refreshRank();
+    } catch (e) {
+      debugPrint('[Auth] background session refresh failed: $e');
     }
   }
 
@@ -166,8 +181,16 @@ class WalletAuthController extends ChangeNotifier {
     // recreate its modal when a newly opened page provides a fresh context.
     final existingAppKit = appKitModal?.appKit;
     if (appKitModal != null) {
-      await appKitModal!.dispose();
+      final previous = appKitModal!;
       appKitModal = null;
+      previous.onModalConnect.unsubscribe(_onModalConnect);
+      previous.onModalDisconnect.unsubscribe(_onModalDisconnect);
+      previous.onModalError.unsubscribe(_onModalError);
+      try {
+        await previous.dispose();
+      } catch (e) {
+        debugPrint('[Reown] disposing previous modal failed: $e');
+      }
     }
     if (!context.mounted) return;
 
@@ -371,7 +394,7 @@ class WalletAuthController extends ChangeNotifier {
         notifyListeners();
         return;
       }
-      DesktopWebAuth.validateState(callback.state);
+      await DesktopWebAuth.validateState(callback.state);
 
       await _persistSession(
         AuthSession(
@@ -601,15 +624,24 @@ class WalletAuthController extends ChangeNotifier {
     referralSummary = null;
     rank = null;
     rankError = null;
-    await _store.clear();
-    if (appKitModal?.isConnected == true) {
-      await appKitModal?.disconnect();
-    }
-    await googleSignOut();
-    await disconnectSolanaMobile(mwaToken);
     awaitingWebCallback = false;
     DesktopWebAuth.clearPendingState();
     notifyListeners();
+    // Every cleanup step is best-effort: the local session is already gone,
+    // and a failing wallet disconnect (e.g. its sign-in page context was
+    // disposed) must not abort the rest.
+    try {
+      await _store.clear();
+    } catch (e) {
+      debugPrint('[Auth] clearing stored session failed: $e');
+    }
+    try {
+      if (appKitModal?.isConnected == true) await appKitModal?.disconnect();
+    } catch (e) {
+      debugPrint('[Reown] disconnect failed: $e');
+    }
+    await googleSignOut();
+    await disconnectSolanaMobile(mwaToken);
   }
 
   /// Revalidates the current bearer session without logging out for recoverable
@@ -909,18 +941,19 @@ class WalletAuthController extends ChangeNotifier {
   Future<void> _authenticateConnectedWallet() async {
     final modal = appKitModal;
     if (modal == null || !modal.isConnected) return;
-
-    final address = await _solanaAddress(modal);
-    if (address == null || address.isEmpty) {
-      authError = 'Connect a Solana wallet';
-      notifyListeners();
-      return;
-    }
+    // Reown can report the connection both from init() and onModalConnect;
+    // a second concurrent run would request a second wallet signature.
+    if (isAuthenticating || isAuthenticated) return;
 
     isAuthenticating = true;
     authError = null;
     notifyListeners();
     try {
+      final address = await _solanaAddress(modal);
+      if (address == null || address.isEmpty) {
+        authError = 'Connect a Solana wallet';
+        return;
+      }
       final challenge = await _authClient.fetchFlowId(walletAddress: address);
       final signature = await _signChallenge(modal, address, challenge.message);
       final session = await _authClient.authenticate(
@@ -928,12 +961,16 @@ class WalletAuthController extends ChangeNotifier {
         signature: signature,
         publicKey: address,
       );
+      // Close the Reown sheet before persisting: persisting notifies the
+      // sign-in page, which pops itself (and anything above it). Closing the
+      // modal afterwards would pop a route that is already gone — the home
+      // screen — or use its now-deactivated context.
+      _closeModalSafely(modal);
       await _persistSession(session, method: 'reown');
       await refreshEntitlement();
       await refreshProfile();
       await refreshAccountOrgInvites();
       await refreshRank();
-      if (modal.isOpen) modal.closeModal();
       debugPrint('[Reown] gateway auth OK for $address');
     } on AuthException catch (e) {
       authError = e.message;
@@ -942,6 +979,14 @@ class WalletAuthController extends ChangeNotifier {
     } finally {
       isAuthenticating = false;
       notifyListeners();
+    }
+  }
+
+  void _closeModalSafely(ReownAppKitModal modal) {
+    try {
+      if (modal.isOpen) modal.closeModal();
+    } catch (e) {
+      debugPrint('[Reown] closeModal skipped: $e');
     }
   }
 
@@ -965,11 +1010,15 @@ class WalletAuthController extends ChangeNotifier {
     String address,
     String message,
   ) async {
-    final chainId = modal.selectedChain!.chainId;
+    final chainId = modal.selectedChain?.chainId;
+    final topic = modal.session?.topic;
+    if (chainId == null || topic == null) {
+      throw AuthException('The wallet disconnected before signing — try again');
+    }
     final messageBase58 = base58.encode(utf8.encode(message));
 
     final response = await modal.request(
-      topic: modal.session!.topic,
+      topic: topic,
       chainId: chainId,
       request: SessionRequestParams(
         method: 'solana_signMessage',

@@ -14,6 +14,7 @@ import '../data/transcription_session.dart';
 import 'inference_service.dart';
 import 'transcription_contract.dart';
 import 'transcription_session_repository.dart';
+import 'voice_preferences.dart';
 import 'whisper_cpp_backend.dart';
 import 'whisper_model_manager.dart';
 
@@ -183,14 +184,23 @@ class TranscriptionService extends ChangeNotifier {
       _throwIfCancelled();
       SpeechAnalyzerProbe? speechProbe;
       final resolvedLocale = resolveTranscriptionLocale(locale);
-      try {
-        speechProbe = await speech.probe(locale: resolvedLocale);
-      } on Object {
-        speechProbe = null;
+      final engine = VoicePreferences.instance.engine;
+      if (engine != DictationEngine.whisper) {
+        try {
+          speechProbe = await speech.probe(locale: resolvedLocale);
+        } on Object {
+          speechProbe = null;
+        }
       }
       final useSpeechAnalyzer =
           speechProbe?.available == true &&
           speechProbe?.localeSupported == true;
+      if (engine == DictationEngine.system && !useSpeechAnalyzer) {
+        throw StateError(
+          'System speech is unavailable for this language on this device. '
+          'Choose Local transcription in Settings → Voice.',
+        );
+      }
       _usingWhisper = !useSpeechAnalyzer;
       await _saveDraft(status: TranscriptionSessionStatus.recording);
       if (useSpeechAnalyzer) {
@@ -211,8 +221,9 @@ class TranscriptionService extends ChangeNotifier {
         _locale = locale.trim().isEmpty ? 'auto' : locale;
         final modelPath = await WhisperModelManager.instance.installedPath();
         if (modelPath == null) {
+          final spec = WhisperModelManager.selectedSpec;
           throw StateError(
-            'Download the 74 MB Whisper Tiny fallback before recording on this device',
+            'Download ${spec.displayName} (${spec.sizeLabel}) in Settings → Voice before recording on this device',
           );
         }
         if (!await _recorder.hasPermission()) {

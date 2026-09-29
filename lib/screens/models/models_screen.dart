@@ -19,14 +19,18 @@ import '../../services/imported_model_service.dart';
 import '../../services/local_server_service.dart';
 import '../../services/model_download_service.dart';
 import '../../services/model_package_service.dart';
+import '../../services/connection_service.dart';
 import '../../services/node_discovery_service.dart';
 import '../../services/storage_service.dart';
 import '../../org/shared_model.dart';
 import '../../state/app_state.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_text.dart';
+import '../../widgets/adaptive_row.dart';
 import '../../widgets/ere_controls.dart';
 import '../auth/sign_in.dart';
+import '../settings/connections_settings.dart';
+import '../settings/settings_screen.dart';
 
 class ModelsScreen extends StatefulWidget {
   const ModelsScreen({
@@ -72,13 +76,13 @@ class _ModelsScreenState extends State<ModelsScreen> {
     );
   }
 
-  int get _networkCount {
-    return NodeDiscoveryService.instance.nodes.length;
-  }
+  int get _networkCount =>
+      NodeDiscoveryService.instance.nodes.length +
+      ConnectionService.instance.enabledConnections.length;
 
   String get _browsingLabel => NodeDiscoveryService.instance.lastError != null
       ? 'DISCOVERY NEEDS ATTENTION · TAP RESCAN'
-      : 'BROWSING _EREBRUSAI._TCP · $_networkCount NODES FOUND';
+      : 'BROWSING _EREBRUSAI._TCP · ${NodeDiscoveryService.instance.nodes.length} NODES FOUND';
 
   List<String> get _segmentItems => [
     'LOCAL · ${{...ModelDownloadService.instance.completed, ...ModelPackageService.instance.installed.where((record) => record.runnable).map((record) => record.modelId), ...ImportedModelService.instance.models.map((record) => record.id)}.length}',
@@ -95,6 +99,7 @@ class _ModelsScreenState extends State<ModelsScreen> {
     return AnimatedBuilder(
       animation: Listenable.merge([
         NodeDiscoveryService.instance,
+        ConnectionService.instance,
         ModelDownloadService.instance,
         ModelPackageService.instance,
         ImportedModelService.instance,
@@ -2377,66 +2382,86 @@ class _LocalModelCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        model.name,
-                        style: AppText.grotesk(14.5, weight: FontWeight.w600),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        model.spec,
-                        style: AppText.mono(10, color: AppColors.textTertiary),
-                      ),
-                    ],
+                  // The action chip stays beside the name when there is room
+                  // and drops under it on narrow phones, so names never wrap.
+                  child: AdaptiveRow(
+                    leading: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          model.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppText.grotesk(14.5, weight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          model.spec,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppText.mono(
+                            10,
+                            color: AppColors.textTertiary,
+                          ),
+                        ),
+                      ],
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        switch (model.status) {
+                          ModelStatus.loaded =>
+                            onUpdate != null
+                                ? AccentChip(
+                                    'UPDATE',
+                                    icon: Symbols.system_update_alt,
+                                    onTap: onUpdate!,
+                                  )
+                                : _MemoryBadge(modelId: model.id ?? ''),
+                          ModelStatus.idle =>
+                            onUse != null
+                                ? AccentChip('USE', onTap: onUse!)
+                                : const StatusBadge('READY'),
+                          ModelStatus.downloading => IconButton(
+                            tooltip: 'Cancel download',
+                            visualDensity: VisualDensity.compact,
+                            onPressed: onCancel,
+                            icon: const Icon(
+                              Symbols.close,
+                              size: 18,
+                              color: AppColors.textSecondary,
+                            ),
+                          ),
+                          ModelStatus.catalog =>
+                            onDownload != null
+                                ? AccentChip(
+                                    'GET',
+                                    icon: Symbols.download,
+                                    onTap: onDownload!,
+                                  )
+                                : const StatusBadge('CATALOG'),
+                        },
+                        if (onDelete != null) ...[
+                          const SizedBox(width: 4),
+                          IconButton(
+                            tooltip: 'Remove imported model',
+                            visualDensity: VisualDensity.compact,
+                            onPressed: onDelete,
+                            icon: const Icon(
+                              Symbols.delete_outline,
+                              size: 18,
+                              color: AppColors.textMuted,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    gap: 10,
+                    stackedGap: 8,
+                    minLeadingWidth: 170,
+                    stackedAlignment: AlignmentDirectional.centerEnd,
                   ),
                 ),
-                switch (model.status) {
-                  ModelStatus.loaded =>
-                    onUpdate != null
-                        ? AccentChip(
-                            'UPDATE',
-                            icon: Symbols.system_update_alt,
-                            onTap: onUpdate!,
-                          )
-                        : const StatusBadge('LOADED'),
-                  ModelStatus.idle =>
-                    onUse != null
-                        ? AccentChip('USE', onTap: onUse!)
-                        : const StatusBadge('READY'),
-                  ModelStatus.downloading => IconButton(
-                    tooltip: 'Cancel download',
-                    visualDensity: VisualDensity.compact,
-                    onPressed: onCancel,
-                    icon: const Icon(
-                      Symbols.close,
-                      size: 18,
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                  ModelStatus.catalog =>
-                    onDownload != null
-                        ? AccentChip(
-                            'GET',
-                            icon: Symbols.download,
-                            onTap: onDownload!,
-                          )
-                        : const StatusBadge('CATALOG'),
-                },
-                if (onDelete != null) ...[
-                  const SizedBox(width: 4),
-                  IconButton(
-                    tooltip: 'Remove imported model',
-                    visualDensity: VisualDensity.compact,
-                    onPressed: onDelete,
-                    icon: const Icon(
-                      Symbols.delete_outline,
-                      size: 18,
-                      color: AppColors.textMuted,
-                    ),
-                  ),
-                ],
               ],
             ),
             if (model.status == ModelStatus.downloading) ...[
@@ -2588,7 +2613,10 @@ class _NetworkList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: NodeDiscoveryService.instance,
+      animation: Listenable.merge([
+        NodeDiscoveryService.instance,
+        ConnectionService.instance,
+      ]),
       builder: (context, _) {
         final app = AppScope.of(context);
         final q = query.toLowerCase();
@@ -2599,6 +2627,17 @@ class _NetworkList extends StatelessWidget {
           return n.name.toLowerCase().contains(q) ||
               n.models.any((m) => m.name.toLowerCase().contains(q));
         }).toList();
+
+        final filteredConnections = ConnectionService
+            .instance
+            .enabledConnections
+            .where(
+              (connection) =>
+                  q.isEmpty ||
+                  connection.name.toLowerCase().contains(q) ||
+                  connection.modelIds.any((id) => id.toLowerCase().contains(q)),
+            )
+            .toList();
 
         final filteredOrgModels = app.orgModels.where((m) {
           if (q.isEmpty) return true;
@@ -2618,8 +2657,24 @@ class _NetworkList extends StatelessWidget {
             ),
             const SizedBox(height: 14),
           ],
+          for (final connection in filteredConnections) ...[
+            ConnectionModelsCard(
+              connection: connection,
+              onUse: onOpenChat,
+              onEdit: () =>
+                  openSettingsSection(context, SettingsSection.connections),
+            ),
+            const SizedBox(height: 14),
+          ],
           for (final node in filteredNodes) ...[
             _NodeCard(node: node, onOpenChat: onOpenChat),
+            const SizedBox(height: 14),
+          ],
+          if (filteredConnections.isEmpty && q.isEmpty) ...[
+            _AddConnectionHint(
+              onTap: () =>
+                  openSettingsSection(context, SettingsSection.connections),
+            ),
             const SizedBox(height: 14),
           ],
           if (app.signedIn) ...[
@@ -2662,6 +2717,42 @@ class _NetworkList extends StatelessWidget {
       ),
     ),
   );
+}
+
+class _AddConnectionHint extends StatelessWidget {
+  const _AddConnectionHint({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        border: Border.all(color: AppColors.stroke),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          const Icon(Symbols.cloud, size: 20, color: AppColors.accentHi),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Text(
+              'Connect llama.cpp, Ollama, LM Studio, another Erebrus node by address, or a cloud provider to use and manage their models here.',
+              style: AppText.grotesk(
+                12.5,
+                color: AppColors.textSecondary,
+                height: 1.4,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          GhostButton('ADD', icon: Symbols.add, onTap: onTap),
+        ],
+      ),
+    );
+  }
 }
 
 class _DiscoveryErrorCard extends StatelessWidget {
@@ -3047,34 +3138,34 @@ class _LockedCard extends StatelessWidget {
               const Icon(Symbols.lock, size: 20, color: AppColors.accent),
               const SizedBox(width: 12),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Private workspace models',
-                      style: AppText.grotesk(13.5, weight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Sign in to see models your team shares.',
-                      style: AppText.grotesk(
-                        11.5,
-                        color: AppColors.textSecondary,
+                child: AdaptiveRow(
+                  leading: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Private workspace models',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppText.grotesk(13.5, weight: FontWeight.w600),
                       ),
-                    ),
-                  ],
-                ),
-              ),
-              GestureDetector(
-                onTap: () => openSignIn(context),
-                child: Text(
-                  'SIGN IN',
-                  style: AppText.mono(
-                    11,
-                    weight: FontWeight.w600,
-                    color: AppColors.accent,
-                    lsEm: 0.04,
+                      const SizedBox(height: 2),
+                      Text(
+                        'Sign in to see models your team shares.',
+                        style: AppText.grotesk(
+                          11.5,
+                          color: AppColors.textSecondary,
+                        ),
+                      ),
+                    ],
                   ),
+                  trailing: AccentChip(
+                    'SIGN IN',
+                    onTap: () => openSignIn(context),
+                  ),
+                  gap: 12,
+                  stackedGap: 8,
+                  minLeadingWidth: 180,
+                  stackedAlignment: AlignmentDirectional.centerEnd,
                 ),
               ),
             ],
@@ -3200,4 +3291,24 @@ class _DashedRRectPainter extends CustomPainter {
   @override
   bool shouldRepaint(_DashedRRectPainter oldDelegate) =>
       oldDelegate.color != color || oldDelegate.radius != radius;
+}
+
+/// LOADED while the model is in memory, otherwise DOWNLOADED. Listens to
+/// the inference service itself so only this badge rebuilds during chat.
+class _MemoryBadge extends StatelessWidget {
+  const _MemoryBadge({required this.modelId});
+
+  final String modelId;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: InferenceService.instance,
+    builder: (context, _) => InferenceService.instance.isLoaded(modelId)
+        ? const StatusBadge('LOADED')
+        : const StatusBadge(
+            'DOWNLOADED',
+            color: AppColors.textMuted,
+            dot: false,
+          ),
+  );
 }

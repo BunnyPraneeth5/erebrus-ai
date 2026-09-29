@@ -100,6 +100,32 @@ class InferenceCoordinator {
     }
   }
 
+  /// Loads the first plan a backend accepts without generating. Returns the
+  /// last failure message, or null once a backend holds the model.
+  Future<String?> preload(List<InferenceExecutionPlan> plans) async {
+    if (_generating) return 'Another local generation is already active';
+    String? lastFailure;
+    for (final plan in plans) {
+      final backend = _backends[plan.backend];
+      if (backend == null || !backend.supports(plan.loadRequest.variant)) {
+        continue;
+      }
+      try {
+        if (_activeBackend != null && _activeBackend != backend) {
+          await _activeBackend!.unload();
+          _activeBackend = null;
+        }
+        await backend.load(plan.loadRequest);
+        _activeBackend = backend;
+        return null;
+      } catch (error) {
+        lastFailure = error.toString();
+        await backend.unload();
+      }
+    }
+    return lastFailure ?? 'No installed backend can run this model variant';
+  }
+
   Future<void> cancel() => _activeBackend?.cancel() ?? Future.value();
 
   Future<void> unload() async {

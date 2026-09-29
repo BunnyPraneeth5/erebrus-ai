@@ -1,4 +1,8 @@
+import 'dart:async';
 import 'dart:math';
+
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'auth_config.dart';
 import '../platform/platform_capabilities.dart';
@@ -33,6 +37,13 @@ class DesktopWebAuth {
 
   static String? _pendingState;
 
+  // The anti-forgery state is also persisted: on phones the OS may kill the
+  // app while the browser is in front, which would otherwise lose it and
+  // reject a valid callback. It expires so a stale state can't be replayed.
+  static const _stateKey = 'web_auth_pending_state';
+  static const _stateTimeKey = 'web_auth_pending_state_at';
+  static const _stateLifetime = Duration(minutes: 15);
+
   static String? get pendingState => _pendingState;
 
   static bool isAuthCallback(String url) {
@@ -46,6 +57,7 @@ class DesktopWebAuth {
   static String buildLoginUrl() {
     final state = _newState();
     _pendingState = state;
+    unawaited(_persistState(state));
     return Uri.parse(
           '${RuntimeConfig.erebrusWebOrigin}$kErebrusDesktopAuthPath',
         )
@@ -121,12 +133,49 @@ class DesktopWebAuth {
     );
   }
 
-  static void clearPendingState() => _pendingState = null;
+  static void clearPendingState() {
+    _pendingState = null;
+    unawaited(_persistState(null));
+  }
 
-  static void validateState(String state) {
-    final expected = _pendingState;
+  static Future<void> validateState(String state) async {
+    final expected = _pendingState ?? await _restoreState();
     if (expected == null || expected.isEmpty || state != expected) {
       throw DesktopWebAuthException('Sign-in state mismatch — try again');
+    }
+  }
+
+  static Future<void> _persistState(String? state) async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      if (state == null) {
+        await preferences.remove(_stateKey);
+        await preferences.remove(_stateTimeKey);
+      } else {
+        await preferences.setString(_stateKey, state);
+        await preferences.setInt(
+          _stateTimeKey,
+          DateTime.now().millisecondsSinceEpoch,
+        );
+      }
+    } catch (e) {
+      debugPrint('[Auth] web sign-in state persist failed: $e');
+    }
+  }
+
+  static Future<String?> _restoreState() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final state = preferences.getString(_stateKey);
+      final at = preferences.getInt(_stateTimeKey);
+      if (state == null || at == null) return null;
+      final age = DateTime.now().difference(
+        DateTime.fromMillisecondsSinceEpoch(at),
+      );
+      return age <= _stateLifetime ? state : null;
+    } catch (e) {
+      debugPrint('[Auth] web sign-in state restore failed: $e');
+      return null;
     }
   }
 

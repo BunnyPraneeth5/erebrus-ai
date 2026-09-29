@@ -3,7 +3,10 @@ import 'package:material_symbols_icons/symbols.dart';
 
 import '../../data/catalog_entry.dart';
 import '../../data/catalog_service.dart';
+import '../../data/model_connection.dart';
+import '../../services/connection_service.dart';
 import '../../services/imported_model_service.dart';
+import '../../services/inference_service.dart';
 import '../../services/model_download_service.dart';
 import '../../services/model_package_service.dart';
 import '../../services/node_discovery_service.dart';
@@ -48,7 +51,7 @@ void showModelPicker(BuildContext context) {
             ),
             title: model.name,
             meta: model.spec,
-            trailing: const StatusBadge('LOADED', dot: true),
+            trailing: _memoryBadge(model.id),
             selected:
                 !app.isNetworkModelSelected && model.id == app.selectedModelId,
             onTap: () {
@@ -68,7 +71,7 @@ void showModelPicker(BuildContext context) {
             title: item.catalog!.name,
             meta:
                 '${item.model.format.toUpperCase()} · ${item.model.backends.join(' / ')}',
-            trailing: const StatusBadge('LOADED', dot: true),
+            trailing: _memoryBadge(item.model.modelId),
             selected:
                 !app.isNetworkModelSelected &&
                 item.model.modelId == app.selectedModelId,
@@ -95,7 +98,9 @@ void showModelPicker(BuildContext context) {
             model.format.toUpperCase(),
             model.backend,
           ].join(' · '),
-          trailing: const StatusBadge('IMPORTED', dot: true),
+          trailing: InferenceService.instance.isLoaded(model.id)
+              ? _memoryBadge(model.id)
+              : const StatusBadge('IMPORTED', dot: true),
           selected:
               !app.isNetworkModelSelected && model.id == app.selectedModelId,
           onTap: () {
@@ -143,9 +148,52 @@ void showModelPicker(BuildContext context) {
             },
           ),
       ],
+      for (final connection in ConnectionService.instance.enabledConnections)
+        if (connection.modelIds.isNotEmpty) ...[
+          _PickerGroupLabel(connection.name.toUpperCase()),
+          for (final model in ConnectionService.instance.modelsFor(connection))
+            _PickerRow(
+              leading: LetterTile(
+                model.id.isEmpty ? '?' : model.id[0].toUpperCase(),
+                accent:
+                    app.selectedNetworkNodeId == connection.nodeId &&
+                    app.selectedModelId == model.id,
+              ),
+              title: model.id,
+              meta: [
+                connection.provider.label,
+                connection.hostLabel,
+              ].join(' · '),
+              trailing: model.state == RemoteModelState.loaded
+                  ? const StatusBadge('LOADED', dot: true)
+                  : Icon(
+                      connection.provider.isLocal ? Symbols.lan : Symbols.cloud,
+                      size: 15,
+                      color:
+                          ConnectionService.instance.errorFor(connection.id) ==
+                              null
+                          ? AppColors.success
+                          : AppColors.danger,
+                    ),
+              selected:
+                  app.selectedNetworkNodeId == connection.nodeId &&
+                  app.selectedModelId == model.id,
+              onTap: () {
+                app.selectConnectionModel(connection, model.id);
+                Navigator.of(context).pop();
+              },
+            ),
+        ],
     ],
   );
 }
+
+/// LOADED only for the model actually in memory; other downloaded models
+/// are READY to load.
+Widget _memoryBadge(String modelId) =>
+    InferenceService.instance.isLoaded(modelId)
+    ? const StatusBadge('LOADED', dot: true)
+    : const StatusBadge('READY', color: AppColors.textMuted, dot: false);
 
 void showPersonaPicker(BuildContext context) {
   final app = AppScope.of(context);

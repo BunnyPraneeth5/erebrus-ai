@@ -120,29 +120,65 @@ void main() {
       );
       expect(find.textContaining('No chat model is required'), findsOneWidget);
 
-      // Settings (guest), with Personas nested under it.
+      // Settings (guest): two-pane layout opens on Account.
       await tester.tap(find.text('SETTINGS'));
       await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Search settings…'), findsOneWidget);
       expect(find.text('Unlock private models & workspaces'), findsOneWidget);
+
+      await tester.tap(find.text('Local server').first);
+      await tester.pump(const Duration(milliseconds: 300));
       expect(find.text('Serve on local network'), findsOneWidget);
-      await tester.scrollUntilVisible(
-        find.text('Manage personas'),
-        250,
-        scrollable: find.byType(Scrollable).last,
-      );
-      await tester.tap(find.text('Manage personas'));
+      expect(find.text('API key'), findsOneWidget);
+
+      // Personas stay nested under General.
+      await tester.tap(find.text('General').first);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Model memory'), findsOneWidget);
+      expect(find.text('No model in memory'), findsOneWidget);
+      await tester.tap(find.text('Manage'));
       await tester.pumpAndSettle();
       expect(find.text('SYSTEM PROMPT'), findsOneWidget);
       expect(find.text('SAVE PERSONA'), findsOneWidget);
       expect(find.text('Share to workspace'), findsOneWidget);
       await tester.pageBack();
       await tester.pumpAndSettle();
-      await tester.scrollUntilVisible(
-        find.text('Assistant voice'),
-        250,
-        scrollable: find.byType(Scrollable).last,
+
+      await tester.tap(find.text('Voice').first);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Dictation engine'), findsOneWidget);
+      expect(find.text('Speech recognition model'), findsOneWidget);
+      expect(find.text('Read aloud button'), findsOneWidget);
+
+      // Connections: empty state leads into the add form.
+      await tester.tap(find.text('Connections').first);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('No connections yet'), findsOneWidget);
+      await tester.tap(find.text('llama.cpp'));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Base URL'), findsOneWidget);
+      expect(find.text('Load available models'), findsOneWidget);
+      expect(
+        find.text(
+          'Or enter model IDs manually (one per line or comma-separated)',
+        ),
+        findsOneWidget,
       );
-      expect(find.text('Assistant voice'), findsOneWidget);
+      await tester.ensureVisible(find.text('Add connection'));
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.text('Add connection'));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        find.text('Select at least one model, or enter model IDs manually'),
+        findsOneWidget,
+      );
+
+      // Search narrows the section list.
+      await tester.enterText(find.byType(TextField).first, 'whisper');
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Account'), findsNothing);
+      expect(find.text('Voice'), findsWidgets);
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('models use desktop catalog details and show storage path', (
@@ -195,7 +231,7 @@ void main() {
       // Sign out restores guest state.
       await tester.tap(find.text('SETTINGS'));
       await tester.pump(const Duration(milliseconds: 300));
-      await tester.tap(find.text('Sign out'));
+      await tester.tap(find.text('Sign out').last);
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.text('Unlock private models & workspaces'), findsOneWidget);
     });
@@ -293,9 +329,18 @@ void main() {
 
       await tester.tap(find.text('SETTINGS'));
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('Serve while app is open'), findsOneWidget);
-      expect(find.text('Maximum response length'), findsOneWidget);
+      expect(find.text('Connections'), findsOneWidget);
+      await tester.tap(find.text('Local server'));
+      await tester.pumpAndSettle();
+      expect(find.text('Serve on local network'), findsOneWidget);
       expect(find.text('Default · ErebrusAI/models'), findsOneWidget);
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('General'));
+      await tester.pumpAndSettle();
+      expect(find.text('Maximum response length'), findsOneWidget);
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pumpAndSettle();
 
       // Sign-in is a full-screen page with guest escape.
       await tester.tap(find.text('SIGN IN / REGISTER'));

@@ -9,10 +9,12 @@ import '../../services/chat_service.dart';
 import '../../services/transcript_prompt_template_service.dart';
 import '../../services/transcription_contract.dart';
 import '../../services/transcription_service.dart';
+import '../../services/voice_preferences.dart';
 import '../../services/whisper_model_manager.dart';
 import '../../state/app_state.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_text.dart';
+import '../../widgets/adaptive_row.dart';
 import '../../widgets/ere_controls.dart';
 
 @visibleForTesting
@@ -63,7 +65,7 @@ class _TranscribeScreenState extends State<TranscribeScreen>
   bool _speechReady = false;
   bool _whisperReady = false;
   bool _checkingReadiness = true;
-  String _selectedLocale = 'auto';
+  String _selectedLocale = VoicePreferences.instance.locale;
 
   @override
   void initState() {
@@ -71,13 +73,48 @@ class _TranscribeScreenState extends State<TranscribeScreen>
     WidgetsBinding.instance.addObserver(this);
     _service.initialize();
     TranscriptPromptTemplateService.instance.load();
+    // This tab stays mounted, so follow Settings → Voice changes live.
+    VoicePreferences.instance.addListener(_onVoicePreferencesChanged);
+    WhisperModelManager.selectedSpecId.addListener(_refreshReadiness);
+    for (final spec in WhisperModelManager.specs) {
+      WhisperModelManager.forSpec(spec).addListener(_onWhisperModelChanged);
+    }
     _refreshReadiness();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    VoicePreferences.instance.removeListener(_onVoicePreferencesChanged);
+    WhisperModelManager.selectedSpecId.removeListener(_refreshReadiness);
+    for (final spec in WhisperModelManager.specs) {
+      WhisperModelManager.forSpec(spec).removeListener(_onWhisperModelChanged);
+    }
     super.dispose();
+  }
+
+  DictationEngine _engine = VoicePreferences.instance.engine;
+
+  void _onVoicePreferencesChanged() {
+    final prefs = VoicePreferences.instance;
+    var changed = false;
+    // Never switch language under an active recording.
+    if (prefs.locale != _selectedLocale && !_service.hasUnfinishedRecording) {
+      _selectedLocale = prefs.locale;
+      changed = true;
+    }
+    if (prefs.engine != _engine) {
+      _engine = prefs.engine;
+      changed = true;
+    }
+    if (changed) _refreshReadiness();
+  }
+
+  /// Re-checks readiness when a speech-model download, delete or rollback
+  /// completes. Managers also notify on every download chunk; skip those.
+  void _onWhisperModelChanged() {
+    if (WhisperModelManager.instance.downloading) return;
+    _refreshReadiness();
   }
 
   @override
@@ -103,14 +140,21 @@ class _TranscribeScreenState extends State<TranscribeScreen>
       });
       return;
     }
+    // Mirror TranscriptionService.start(): system speech only counts when
+    // the chosen engine allows it; Whisper only when the engine can use it.
+    final engine = VoicePreferences.instance.engine;
     var speechReady = false;
-    try {
-      final probe = await _service.probe(locale: _selectedLocale);
-      speechReady = probe.available && probe.localeSupported;
-    } on Object {
-      speechReady = false;
+    if (engine != DictationEngine.whisper) {
+      try {
+        final probe = await _service.probe(locale: _selectedLocale);
+        speechReady = probe.available && probe.localeSupported;
+      } on Object {
+        speechReady = false;
+      }
     }
-    final whisper = await WhisperModelManager.instance.installedPath() != null;
+    final whisper =
+        engine != DictationEngine.system &&
+        await WhisperModelManager.instance.installedPath() != null;
     if (!mounted) return;
     setState(() {
       _speechReady = speechReady;
@@ -137,7 +181,11 @@ class _TranscribeScreenState extends State<TranscribeScreen>
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([_service, WhisperModelManager.instance]),
+      animation: Listenable.merge([
+        _service,
+        WhisperModelManager.instance,
+        WhisperModelManager.selectedSpecId,
+      ]),
       builder: (context, _) {
         final content = _RecorderPane(
           service: _service,
@@ -150,6 +198,7 @@ class _TranscribeScreenState extends State<TranscribeScreen>
           locale: _selectedLocale,
           onLocaleChanged: (locale) {
             setState(() => _selectedLocale = locale);
+            VoicePreferences.instance.setLocale(locale);
             _refreshReadiness();
           },
         );
@@ -611,26 +660,28 @@ class _TranscriptionReadinessCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final manager = WhisperModelManager.instance;
+    final spec = manager.spec;
     final ready = speechReady || whisperReady;
     final title = manager.downloading
-        ? 'Downloading Whisper Tiny…'
+        ? 'Downloading ${spec.displayName}…'
         : checking
         ? 'Checking transcription engine…'
         : speechReady
         ? 'SpeechAnalyzer ready'
         : whisperReady
-        ? 'Whisper Tiny ready'
+        ? '${spec.displayName} ready'
         : 'Transcription setup required';
     final detail = manager.downloading
-        ? '${(manager.progress * 100).clamp(0, 100).toStringAsFixed(0)}% of 74 MB · verified before activation'
+        ? '${(manager.progress * 100).clamp(0, 100).toStringAsFixed(0)}% of ${spec.sizeLabel} · verified before activation'
         : checking
         ? 'Verifying private on-device speech support.'
         : speechReady
         ? 'Uses Apple on-device speech assets. No chat model is required.'
         : whisperReady
         ? 'Uses the verified local Whisper model. No chat model is required.'
-        : 'SpeechAnalyzer is unavailable here. Download the verified 74 MB '
-              'Whisper Tiny model before recording. No chat model is required.';
+        : 'SpeechAnalyzer is unavailable here. Download the verified '
+              '${spec.sizeLabel} ${spec.displayName} model before recording '
+              '(change it in Settings → Voice). No chat model is required.';
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -663,33 +714,51 @@ class _TranscriptionReadinessCard extends StatelessWidget {
             ),
           const SizedBox(width: 11),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: AppText.grotesk(13, weight: FontWeight.w600),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  detail,
-                  style: AppText.grotesk(
-                    11.5,
-                    color: AppColors.textMuted,
-                    height: 1.35,
+            child: () {
+              final text = Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: AppText.grotesk(13, weight: FontWeight.w600),
                   ),
-                ),
-              ],
-            ),
+                  const SizedBox(height: 2),
+                  Text(
+                    detail,
+                    style: AppText.grotesk(
+                      11.5,
+                      color: AppColors.textMuted,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              );
+              final action = manager.downloading
+                  ? GhostButton(
+                      'CANCEL',
+                      icon: Symbols.close,
+                      onTap: manager.cancelDownload,
+                    )
+                  : !checking && !ready
+                  ? GhostButton(
+                      'DOWNLOAD',
+                      icon: Symbols.download,
+                      onTap: onSetup,
+                    )
+                  : null;
+              // On narrow phones the button drops under the text instead
+              // of squeezing the heading onto two lines.
+              return action == null
+                  ? text
+                  : AdaptiveRow(
+                      leading: text,
+                      trailing: action,
+                      gap: 10,
+                      minLeadingWidth: 190,
+                      stackedAlignment: AlignmentDirectional.centerEnd,
+                    );
+            }(),
           ),
-          if (manager.downloading)
-            GhostButton(
-              'CANCEL',
-              icon: Symbols.close,
-              onTap: manager.cancelDownload,
-            )
-          else if (!checking && !ready)
-            GhostButton('DOWNLOAD', icon: Symbols.download, onTap: onSetup),
         ],
       ),
     );
@@ -711,6 +780,9 @@ class _LanguageSelector extends StatelessWidget {
   Widget build(BuildContext context) {
     return DropdownButtonFormField<String>(
       initialValue: value,
+      // Expanded so long language names ellipsize inside the field instead
+      // of overflowing it on narrow phones or with large text.
+      isExpanded: true,
       decoration: const InputDecoration(
         labelText: 'Spoken language',
         helperText: 'Auto uses your device language; Whisper can auto-detect.',
@@ -719,7 +791,14 @@ class _LanguageSelector extends StatelessWidget {
       ),
       items: [
         for (final entry in transcriptionLocales.entries)
-          DropdownMenuItem(value: entry.key, child: Text(entry.value)),
+          DropdownMenuItem(
+            value: entry.key,
+            child: Text(
+              entry.value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
       ],
       onChanged: enabled
           ? (value) {
@@ -758,60 +837,66 @@ class _WhisperRuntimeCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 11),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Whisper Tiny runtime',
-                        style: AppText.grotesk(13, weight: FontWeight.w600),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        installed
-                            ? manager.updateAvailable
-                                  ? 'Verified update available · previous revision stays rollback-ready'
-                                  : 'Required on this device · verified · 74 MB · multilingual'
-                            : manager.downloading
-                            ? '${(manager.progress * 100).clamp(0, 100).toStringAsFixed(0)}% · checksum verified after download'
-                            : 'Required before transcription can start on this device',
-                        style: AppText.grotesk(
-                          11.5,
-                          color: AppColors.textMuted,
+                  // Actions drop under the text on narrow phones rather than
+                  // wrapping the model name.
+                  child: AdaptiveRow(
+                    leading: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${manager.spec.displayName} runtime',
+                          style: AppText.grotesk(13, weight: FontWeight.w600),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 2),
+                        Text(
+                          installed
+                              ? manager.updateAvailable
+                                    ? 'Verified update available · previous revision stays rollback-ready'
+                                    : 'Required on this device · verified · ${manager.spec.sizeLabel} · ${manager.spec.summary.toLowerCase()}'
+                              : manager.downloading
+                              ? '${(manager.progress * 100).clamp(0, 100).toStringAsFixed(0)}% · checksum verified after download'
+                              : 'Required before transcription can start on this device',
+                          style: AppText.grotesk(
+                            11.5,
+                            color: AppColors.textMuted,
+                          ),
+                        ),
+                      ],
+                    ),
+                    trailing: installed && manager.updateAvailable
+                        ? GhostButton(
+                            'UPDATE',
+                            icon: Symbols.system_update_alt,
+                            onTap: () => _install(context, manager),
+                          )
+                        : installed && manager.canRollback
+                        ? GhostButton(
+                            'ROLLBACK',
+                            icon: Symbols.history,
+                            onTap: () => _rollback(context, manager),
+                          )
+                        : installed
+                        ? const Icon(
+                            Symbols.check_circle,
+                            color: AppColors.success,
+                            size: 20,
+                          )
+                        : manager.downloading
+                        ? GhostButton(
+                            'CANCEL',
+                            icon: Symbols.close,
+                            onTap: manager.cancelDownload,
+                          )
+                        : GhostButton(
+                            'DOWNLOAD',
+                            icon: Symbols.download,
+                            onTap: () => _install(context, manager),
+                          ),
+                    gap: 10,
+                    minLeadingWidth: 190,
+                    stackedAlignment: AlignmentDirectional.centerEnd,
                   ),
                 ),
-                if (installed && manager.updateAvailable)
-                  GhostButton(
-                    'UPDATE',
-                    icon: Symbols.system_update_alt,
-                    onTap: () => _install(context, manager),
-                  )
-                else if (installed && manager.canRollback)
-                  GhostButton(
-                    'ROLLBACK',
-                    icon: Symbols.history,
-                    onTap: () => _rollback(context, manager),
-                  )
-                else if (installed)
-                  const Icon(
-                    Symbols.check_circle,
-                    color: AppColors.success,
-                    size: 20,
-                  )
-                else if (manager.downloading)
-                  GhostButton(
-                    'CANCEL',
-                    icon: Symbols.close,
-                    onTap: manager.cancelDownload,
-                  )
-                else
-                  GhostButton(
-                    'DOWNLOAD',
-                    icon: Symbols.download,
-                    onTap: () => _install(context, manager),
-                  ),
               ],
             ),
           );
@@ -1529,7 +1614,9 @@ class _SessionTile extends StatelessWidget {
         child: ListTile(
           selected: active,
           selectedTileColor: AppColors.surface3,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
           title: Text(
             session.effectiveTranscript.isEmpty
                 ? 'Recording · ${_sessionDate(session.createdAt)}'

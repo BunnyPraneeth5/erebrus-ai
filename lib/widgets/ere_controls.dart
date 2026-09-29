@@ -213,6 +213,8 @@ class GhostButton extends StatelessWidget {
                 ],
                 Text(
                   label,
+                  maxLines: 1,
+                  softWrap: false,
                   style: AppText.mono(
                     11,
                     weight: FontWeight.w500,
@@ -296,6 +298,8 @@ class AccentChip extends StatelessWidget {
                 ],
                 Text(
                   label,
+                  maxLines: 1,
+                  softWrap: false,
                   style: AppText.mono(
                     fontSize,
                     weight: FontWeight.w600,

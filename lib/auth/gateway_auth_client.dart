@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -144,11 +145,9 @@ class GatewayAuthClient {
     required String code,
     required String bearerToken,
   }) async {
-    final map = await _postJson(
-      Uri.parse('$_base/api/v2/referrals/redeem'),
-      {'code': code.trim().toUpperCase()},
-      bearerToken: bearerToken,
-    );
+    final map = await _postJson(Uri.parse('$_base/api/v2/referrals/redeem'), {
+      'code': code.trim().toUpperCase(),
+    }, bearerToken: bearerToken);
     return ReferralSummary.fromJson(map);
   }
 
@@ -183,13 +182,11 @@ class GatewayAuthClient {
     required String email,
     required String code,
   }) async {
-    final map = await _postJson(
-      Uri.parse('$_base/api/v2/auth/email/login/verify'),
-      {
-        'email': email.trim().toLowerCase(),
-        'code': code.replaceAll(RegExp(r'\D'), ''),
-      },
-    );
+    final map =
+        await _postJson(Uri.parse('$_base/api/v2/auth/email/login/verify'), {
+          'email': email.trim().toLowerCase(),
+          'code': code.replaceAll(RegExp(r'\D'), ''),
+        });
     return _identitySession(map);
   }
 
@@ -239,16 +236,40 @@ class GatewayAuthClient {
     }
   }
 
+  static const _connectTimeout = Duration(seconds: 15);
+  static const _responseTimeout = Duration(seconds: 30);
+
+  HttpClient _newClient() => HttpClient()..connectionTimeout = _connectTimeout;
+
+  AuthException _transportError(Object error) => switch (error) {
+    SocketException(:final message) => AuthException(
+      'Cannot reach gateway ($_base): $message',
+    ),
+    TimeoutException() => AuthException(
+      'The gateway took too long to respond — check your connection and try again',
+    ),
+    HandshakeException() => AuthException(
+      'Secure connection to the gateway failed — check the device date and network',
+    ),
+    HttpException(:final message) => AuthException(
+      'Gateway connection failed: $message',
+    ),
+    FormatException() => AuthException(
+      'The gateway returned an unexpected response',
+    ),
+    _ => AuthException(error.toString()),
+  };
+
   Future<dynamic> _getJson(Uri uri, {String? bearerToken}) async {
-    final client = HttpClient();
+    final client = _newClient();
     try {
       final req = await client.getUrl(uri);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       if (bearerToken != null && bearerToken.isNotEmpty) {
         req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $bearerToken');
       }
-      final res = await req.close();
-      final text = await utf8.decodeStream(res);
+      final res = await req.close().timeout(_responseTimeout);
+      final text = await utf8.decodeStream(res).timeout(_responseTimeout);
       if (res.statusCode < 200 || res.statusCode >= 300) {
         final error = _apiError(res.statusCode, text);
         if (res.statusCode == HttpStatus.unauthorized &&
@@ -263,8 +284,16 @@ class GatewayAuthClient {
         );
       }
       return jsonDecode(text);
-    } on SocketException catch (e) {
-      throw AuthException('Cannot reach gateway ($_base): ${e.message}');
+    } on AuthException {
+      rethrow;
+    } on Object catch (e) {
+      if (e is! SocketException &&
+          e is! TimeoutException &&
+          e is! HttpException &&
+          e is! FormatException) {
+        rethrow;
+      }
+      throw _transportError(e);
     } finally {
       client.close(force: true);
     }
@@ -275,7 +304,7 @@ class GatewayAuthClient {
     Map<String, dynamic> body, {
     String? bearerToken,
   }) async {
-    final client = HttpClient();
+    final client = _newClient();
     try {
       final req = await client.postUrl(uri);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
@@ -286,8 +315,8 @@ class GatewayAuthClient {
       final encoded = jsonEncode(body);
       req.contentLength = utf8.encode(encoded).length;
       req.write(encoded);
-      final res = await req.close();
-      final text = await utf8.decodeStream(res);
+      final res = await req.close().timeout(_responseTimeout);
+      final text = await utf8.decodeStream(res).timeout(_responseTimeout);
       if (res.statusCode < 200 || res.statusCode >= 300) {
         final error = _apiError(res.statusCode, text);
         if (res.statusCode == HttpStatus.unauthorized &&
@@ -305,8 +334,16 @@ class GatewayAuthClient {
       final decoded = jsonDecode(text);
       if (decoded is Map) return Map<String, dynamic>.from(decoded);
       return const {};
-    } on SocketException catch (e) {
-      throw AuthException('Cannot reach gateway ($_base): ${e.message}');
+    } on AuthException {
+      rethrow;
+    } on Object catch (e) {
+      if (e is! SocketException &&
+          e is! TimeoutException &&
+          e is! HttpException &&
+          e is! FormatException) {
+        rethrow;
+      }
+      throw _transportError(e);
     } finally {
       client.close(force: true);
     }
@@ -390,7 +427,9 @@ class ReferralSummary {
     final recentRaw = j['recent'];
     return ReferralSummary(
       code: (j['code'] ?? '').toString(),
-      referredCount: j['referred_count'] is int ? j['referred_count'] as int : 0,
+      referredCount: j['referred_count'] is int
+          ? j['referred_count'] as int
+          : 0,
       referralBound: j['referral_bound'] == true,
       referredBy: (j['referred_by'] as String?)?.trim().isNotEmpty == true
           ? j['referred_by'] as String
@@ -398,7 +437,9 @@ class ReferralSummary {
       recent: recentRaw is List
           ? recentRaw
                 .whereType<Map>()
-                .map((e) => ReferralReferee.fromJson(Map<String, dynamic>.from(e)))
+                .map(
+                  (e) => ReferralReferee.fromJson(Map<String, dynamic>.from(e)),
+                )
                 .toList()
           : const [],
     );

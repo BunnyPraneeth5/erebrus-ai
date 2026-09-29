@@ -2,7 +2,7 @@ name: erebrus_ai
 description: "Erebrus AI — local LLM runner. Download models, chat on-device, and serve them to your network."
 publish_to: 'none'
 
-version: 1.0.2+1
+version: 1.1.0+2
 
 environment:
   sdk: ^3.12.2
@@ -56,6 +56,8 @@ dependencies:
     path: third_party/erebrus_turboquant
   tray_manager: ^0.5.3
   window_manager: ^0.5.1
+  html: ^0.15.7
+  markdown: ^7.3.1
 
 dependency_overrides:
   # Upstream 0.7.3 decodes each token independently and crashes when a UTF-8
