@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - build/ci-test-builds
   workflow_dispatch:
 
 jobs:
@@ -110,7 +112,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libblkid-dev liblzma-dev libsecret-1-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libblkid-dev liblzma-dev libsecret-1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libayatana-appindicator3-dev
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -118,8 +120,17 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Create .env placeholder
-        run: cp env.example .env
+      - name: Write production .env
+        shell: bash
+        env:
+          REOWN_PROJECT_ID: ${{ secrets.REOWN_PROJECT_ID }}
+        run: |
+          {
+            echo "REOWN_PROJECT_ID=${REOWN_PROJECT_ID}"
+            echo "EREBRUS_WEB_ORIGIN=https://erebrus.io"
+            echo "GATEWAY_URL=https://gateway.erebrus.io"
+            echo "MODEL_CATALOG_BASE_URL=https://erebrus.io"
+          } > .env
 
       - name: Install dependencies
         run: flutter pub get
@@ -169,14 +180,26 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Create .env placeholder
-        run: cp env.example .env
+      - name: Write production .env
+        shell: bash
+        env:
+          REOWN_PROJECT_ID: ${{ secrets.REOWN_PROJECT_ID }}
+        run: |
+          {
+            echo "REOWN_PROJECT_ID=${REOWN_PROJECT_ID}"
+            echo "EREBRUS_WEB_ORIGIN=https://erebrus.io"
+            echo "GATEWAY_URL=https://gateway.erebrus.io"
+            echo "MODEL_CATALOG_BASE_URL=https://erebrus.io"
+          } > .env
 
       - name: Install dependencies
         run: flutter pub get
 
       - name: Build Play Store AAB
         run: flutter build appbundle --flavor playstore --release --target-platform android-arm64
+
+      - name: Build Play Store APK (sideload test build)
+        run: flutter build apk --flavor playstore --release --target-platform android-arm64
 
       - name: Build dApp Store APK
         run: flutter build apk --flavor dappstore --release --target-platform android-arm64
@@ -193,6 +216,7 @@ jobs:
             APK="build/app/outputs/apk/dappstore/release/app-dappstore-release.apk"
           fi
           cp "$APK" "dist/ErebrusAI-android-dappstore-v${VERSION_NAME}.apk"
+          cp build/app/outputs/flutter-apk/app-playstore-release.apk "dist/ErebrusAI-android-playstore-v${VERSION_NAME}.apk"
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
@@ -201,6 +225,7 @@ jobs:
           path: |
             dist/ErebrusAI-android-playstore-v*.aab
             dist/ErebrusAI-android-dappstore-v*.apk
+            dist/ErebrusAI-android-playstore-v*.apk
 
   release:
     name: Create GitHub Release
