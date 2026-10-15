@@ -18,6 +18,7 @@ import '../../services/on_device_diagnostics_service.dart';
 import '../../services/storage_service.dart';
 import '../../services/transcription_service.dart';
 import '../../org/ai_org.dart';
+import '../../org/org_state.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_text.dart';
 import '../../widgets/ere_controls.dart';
@@ -1439,7 +1440,9 @@ class _OrganizationsCard extends StatelessWidget {
             iconColor: AppColors.orgPurple,
             title: org.name,
             subtitle:
-                '${org.isAdmin ? 'Admin' : org.role} · ${app.orgModels.length} shared model${app.orgModels.length == 1 ? '' : 's'}',
+                OrgState.sharedFeaturesAvailable
+                    ? '${org.isAdmin ? 'Admin' : org.role} · ${app.orgModels.length} shared model${app.orgModels.length == 1 ? '' : 's'}'
+                    : '${org.isAdmin ? 'Admin' : org.role} · shared models coming soon',
             trailing: [
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),

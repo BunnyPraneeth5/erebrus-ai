@@ -19,6 +19,10 @@ class OrgState extends ChangeNotifier {
     _onAuthChanged();
   }
 
+  /// Workspace-shared models and persona sharing need gateway routes that are
+  /// not live yet; keep them hidden (no requests, no errors) until they ship.
+  static const bool sharedFeaturesAvailable = false;
+
   final WalletAuthController _auth;
   final OrgClient _client;
 
@@ -105,7 +109,7 @@ class OrgState extends ChangeNotifier {
   Future<void> refreshOrgModels() async {
     final token = _token;
     final org = selectedOrg;
-    if (token == null || token.isEmpty || org == null) {
+    if (!sharedFeaturesAvailable || token == null || token.isEmpty || org == null) {
       orgModels = [];
       notifyListeners();
       return;
@@ -129,6 +133,9 @@ class OrgState extends ChangeNotifier {
   }
 
   Future<void> sharePersona(String personaId) async {
+    if (!sharedFeaturesAvailable) {
+      throw OrgException('Sharing personas with a workspace is coming soon.');
+    }
     final token = _token;
     final org = selectedOrg;
     if (token == null || token.isEmpty || org == null) return;

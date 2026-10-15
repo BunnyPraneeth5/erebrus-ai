@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
 import '../../data/mock_data.dart';
+import '../../org/org_state.dart';
 import '../../services/persona_service.dart';
 import '../../state/app_state.dart';
 import '../../theme/app_colors.dart';
@@ -552,11 +553,13 @@ class _PersonaEditorState extends State<PersonaEditor> {
           ],
         ),
       ),
-      const SizedBox(height: 14),
-      _ShareCard(
-        value: _shareToOrg,
-        onChanged: (value) => setState(() => _shareToOrg = value),
-      ),
+      if (OrgState.sharedFeaturesAvailable) ...[
+        const SizedBox(height: 14),
+        _ShareCard(
+          value: _shareToOrg,
+          onChanged: (value) => setState(() => _shareToOrg = value),
+        ),
+      ],
       const SizedBox(height: 14),
       PrimaryCta('SAVE PERSONA', onTap: _save),
     ];
